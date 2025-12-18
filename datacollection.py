@@ -26,20 +26,50 @@ except Exception as e:
 
 # ==================== 文件名清理函数 ====================
 
+def chinese_to_pinyin_simple(text):
+    """
+    简单的中文转拼音方法（使用哈希）
+    因为完整拼音库可能不可用，我们用更简单的方法
+    """
+    # 移除所有非字母数字的字符
+    cleaned = re.sub(r'[^\w]', '', text)
+    
+    # 如果有英文字母和数字，保留它们
+    ascii_part = re.sub(r'[^\x00-\x7F]', '', cleaned)
+    
+    # 对于中文部分，生成一个短哈希
+    if len(ascii_part) < len(cleaned):
+        # 有中文字符
+        hash_obj = hashlib.md5(text.encode('utf-8'))
+        hash_str = hash_obj.hexdigest()[:8]
+        if ascii_part:
+            return f"{ascii_part}_{hash_str}"
+        else:
+            return f"unit_{hash_str}"
+    else:
+        # 纯英文
+        return ascii_part if ascii_part else "unit"
+
 def sanitize_path(path_str):
     """
-    清理路径字符串，移除或替换特殊字符
-    只保留字母、数字、下划线、连字符
+    清理路径字符串，将中文转换为安全的ASCII字符
     """
-    # 移除所有可能导致问题的字符
-    safe_str = re.sub(r'[^\w\-]', '_', path_str)
-    # 移除连续的下划线
+    # 先尝试转换中文
+    safe_str = chinese_to_pinyin_simple(path_str)
+    
+    # 再次清理，确保只有安全字符
+    safe_str = re.sub(r'[^\w\-]', '_', safe_str)
     safe_str = re.sub(r'_+', '_', safe_str)
-    # 移除开头和结尾的下划线
     safe_str = safe_str.strip('_')
+    
     # 限制长度
     if len(safe_str) > 50:
         safe_str = safe_str[:50]
+    
+    # 如果为空，使用默认值
+    if not safe_str:
+        safe_str = f"file_{datetime.now().strftime('%Y%m%d')}"
+    
     return safe_str
 
 def generate_safe_filename(original_name, prefix="file"):
@@ -48,19 +78,20 @@ def generate_safe_filename(original_name, prefix="file"):
     使用时间戳 + 原文件扩展名
     """
     ext = os.path.splitext(original_name)[1]
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:17]  # 精确到毫秒前3位
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:17]
     return f"{prefix}_{timestamp}{ext}"
 
 def get_unit_safe_name(unit_name):
     """
-    为单位名称生成安全的文件夹名
-    使用哈希值作为唯一标识
+    为单位名称生成安全的文件夹名（纯ASCII）
     """
-    # 创建单位名称的哈希值作为唯一标识
-    unit_hash = hashlib.md5(unit_name.encode()).hexdigest()[:8]
-    # 使用sanitize_path处理单位名称
+    # 生成哈希作为唯一标识
+    unit_hash = hashlib.md5(unit_name.encode('utf-8')).hexdigest()[:8]
+    
+    # 转换中文为安全字符
     safe_name = sanitize_path(unit_name)
-    # 组合：安全名称_哈希值
+    
+    # 组合
     return f"{safe_name}_{unit_hash}"
 
 # ==================== 数据库操作函数 ====================
@@ -71,7 +102,11 @@ def save_to_supabase(table_name, data):
         result = supabase.table(table_name).insert(data).execute()
         return True, result
     except Exception as e:
-        return False, str(e)
+        error_msg = str(e)
+        # 如果是RLS错误，给出更友好的提示
+        if "row-level security policy" in error_msg.lower() or "violates" in error_msg.lower():
+            return False, "数据库权限配置错误，请联系管理员检查RLS策略"
+        return False, error_msg
 
 def update_supabase(table_name, data, match_field, match_value):
     """更新Supabase数据"""
@@ -79,7 +114,10 @@ def update_supabase(table_name, data, match_field, match_value):
         result = supabase.table(table_name).update(data).eq(match_field, match_value).execute()
         return True, result
     except Exception as e:
-        return False, str(e)
+        error_msg = str(e)
+        if "row-level security policy" in error_msg.lower() or "violates" in error_msg.lower():
+            return False, "数据库权限配置错误，请联系管理员检查RLS策略"
+        return False, error_msg
 
 def get_from_supabase(table_name, unit_name=None):
     """从Supabase获取数据"""
@@ -97,6 +135,9 @@ def upload_file_to_storage(file, bucket_name, file_path):
     """上传文件到Supabase Storage"""
     try:
         file_bytes = file.getvalue()
+        
+        # 确保路径是纯ASCII
+        file_path = file_path.encode('ascii', 'ignore').decode('ascii')
         
         # 尝试上传，如果文件已存在则覆盖
         try:
@@ -134,6 +175,11 @@ def main():
         st.warning("⚠️ 请先填写单位名称后再继续填报")
         return
     
+    # 显示转换后的路径（用于调试）
+    with st.expander("🔍 调试信息（可选查看）"):
+        safe_folder = get_unit_safe_name(unit_name)
+        st.code(f"单位名称: {unit_name}\n文件夹路径: {safe_folder}")
+    
     st.markdown("---")
     
     # 创建标签页
@@ -164,43 +210,49 @@ def main():
                 st.error("❌ 请填写完整的联系人和联系电话")
             elif summary_plan_file:
                 with st.spinner("正在上传文档..."):
-                    # 生成安全的文件名
-                    safe_filename = generate_safe_filename(summary_plan_file.name, prefix="summary")
-                    
-                    # 使用安全的单位名称作为文件夹名
-                    safe_unit_folder = get_unit_safe_name(unit_name)
-                    file_path = f"{safe_unit_folder}/summary/{safe_filename}"
-                    
-                    # 上传文档
-                    success, result = upload_file_to_storage(summary_plan_file, "documents", file_path)
-                    
-                    if success:
-                        document_url = result
+                    try:
+                        # 生成安全的文件名
+                        safe_filename = generate_safe_filename(summary_plan_file.name, prefix="summary")
                         
-                        # 保存记录到数据库
-                        data = {
-                            "unit_name": unit_name,
-                            "contact_person": contact_person,
-                            "contact_phone": contact_phone,
-                            "summary_url": document_url,
-                            "plan_url": None,
-                            "updated_at": datetime.now().isoformat()
-                        }
+                        # 使用安全的单位名称作为文件夹名
+                        safe_unit_folder = get_unit_safe_name(unit_name)
+                        file_path = f"{safe_unit_folder}/summary/{safe_filename}"
                         
-                        # 检查是否已存在记录
-                        existing = get_from_supabase("work_summary", unit_name)
-                        if existing:
-                            success, result = update_supabase("work_summary", data, "unit_name", unit_name)
-                        else:
-                            success, result = save_to_supabase("work_summary", data)
+                        st.info(f"📁 上传路径: {file_path}")
+                        
+                        # 上传文档
+                        success, result = upload_file_to_storage(summary_plan_file, "documents", file_path)
                         
                         if success:
-                            st.success("✅ 保存成功！")
-                            st.info(f"📄 原文件名：{summary_plan_file.name}")
+                            document_url = result
+                            
+                            # 保存记录到数据库
+                            data = {
+                                "unit_name": unit_name,
+                                "contact_person": contact_person,
+                                "contact_phone": contact_phone,
+                                "summary_url": document_url,
+                                "plan_url": None,
+                                "updated_at": datetime.now().isoformat()
+                            }
+                            
+                            # 检查是否已存在记录
+                            existing = get_from_supabase("work_summary", unit_name)
+                            if existing:
+                                success, result = update_supabase("work_summary", data, "unit_name", unit_name)
+                            else:
+                                success, result = save_to_supabase("work_summary", data)
+                            
+                            if success:
+                                st.success("✅ 保存成功！")
+                                st.info(f"📄 原文件名：{summary_plan_file.name}")
+                            else:
+                                st.error(f"❌ 数据库保存失败: {result}")
+                                st.warning("💡 请联系管理员检查数据库表的RLS（行级安全）策略设置")
                         else:
-                            st.error(f"❌ 保存失败: {result}")
-                    else:
-                        st.error(f"❌ 文档上传失败: {result}")
+                            st.error(f"❌ 文档上传失败: {result}")
+                    except Exception as e:
+                        st.error(f"❌ 上传过程出错: {str(e)}")
             else:
                 st.warning("⚠️ 请上传年度总结与计划文档")
     
@@ -316,7 +368,8 @@ def main():
                                     st.session_state.academic_form_key = 0
                                     st.rerun()
                                 else:
-                                    st.warning(f"⚠️ 成功{success_count}条")
+                                    st.warning(f"⚠️ 成功提交{success_count}条，失败{len(st.session_state.academic_activities) - success_count}条")
+                                    st.error("部分数据提交失败，可能是数据库权限问题，请联系管理员")
                 else:
                     st.error("❌ 请填写所有必填项（标有*）")
     
@@ -427,6 +480,8 @@ def main():
                                     st.session_state.popular_activities = []
                                     st.session_state.popular_form_key = 0
                                     st.rerun()
+                                else:
+                                    st.warning(f"⚠️ 成功提交{success_count}条")
                 else:
                     st.error("❌ 请填写所有必填项（标有*）")
     
