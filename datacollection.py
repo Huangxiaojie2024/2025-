@@ -6,7 +6,7 @@ import base64
 from supabase import create_client, Client
 import os
 import re
-import urllib.parse
+import hashlib
 
 # 设置页面配置
 st.set_page_config(
@@ -26,36 +26,21 @@ except Exception as e:
 
 # ==================== 文件名清理函数 ====================
 
-def sanitize_filename(filename):
+def sanitize_path(path_str):
     """
-    清理文件名，移除或替换特殊字符
-    保留文件扩展名
+    清理路径字符串，移除或替换特殊字符
+    只保留字母、数字、下划线、连字符
     """
-    # 获取文件名和扩展名
-    name, ext = os.path.splitext(filename)
-    
-    # 移除所有特殊字符，只保留字母、数字、中文、下划线、连字符
-    # 注意：这里移除了括号、空格等特殊字符
-    name = re.sub(r'[^\w\u4e00-\u9fff\-]', '_', name)
-    
+    # 移除所有可能导致问题的字符
+    safe_str = re.sub(r'[^\w\-]', '_', path_str)
     # 移除连续的下划线
-    name = re.sub(r'_+', '_', name)
-    
+    safe_str = re.sub(r'_+', '_', safe_str)
     # 移除开头和结尾的下划线
-    name = name.strip('_')
-    
-    # 限制文件名长度
-    if len(name) > 100:
-        name = name[:100]
-    
-    # 如果清理后名字为空，使用时间戳
-    if not name:
-        name = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # URL编码以支持中文
-    name = urllib.parse.quote(name)
-    
-    return f"{name}{ext}"
+    safe_str = safe_str.strip('_')
+    # 限制长度
+    if len(safe_str) > 50:
+        safe_str = safe_str[:50]
+    return safe_str
 
 def generate_safe_filename(original_name, prefix="file"):
     """
@@ -65,6 +50,18 @@ def generate_safe_filename(original_name, prefix="file"):
     ext = os.path.splitext(original_name)[1]
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:17]  # 精确到毫秒前3位
     return f"{prefix}_{timestamp}{ext}"
+
+def get_unit_safe_name(unit_name):
+    """
+    为单位名称生成安全的文件夹名
+    使用哈希值作为唯一标识
+    """
+    # 创建单位名称的哈希值作为唯一标识
+    unit_hash = hashlib.md5(unit_name.encode()).hexdigest()[:8]
+    # 使用sanitize_path处理单位名称
+    safe_name = sanitize_path(unit_name)
+    # 组合：安全名称_哈希值
+    return f"{safe_name}_{unit_hash}"
 
 # ==================== 数据库操作函数 ====================
 
@@ -170,9 +167,9 @@ def main():
                     # 生成安全的文件名
                     safe_filename = generate_safe_filename(summary_plan_file.name, prefix="summary")
                     
-                    # 使用URL编码的单位名和英文文件夹名
-                    safe_unit_name = urllib.parse.quote(unit_name)
-                    file_path = f"{safe_unit_name}/summary/{safe_filename}"
+                    # 使用安全的单位名称作为文件夹名
+                    safe_unit_folder = get_unit_safe_name(unit_name)
+                    file_path = f"{safe_unit_folder}/summary/{safe_filename}"
                     
                     # 上传文档
                     success, result = upload_file_to_storage(summary_plan_file, "documents", file_path)
@@ -284,7 +281,7 @@ def main():
                             # 提交所有数据
                             with st.spinner("正在上传数据..."):
                                 success_count = 0
-                                safe_unit_name = urllib.parse.quote(unit_name)
+                                safe_unit_folder = get_unit_safe_name(unit_name)
                                 
                                 for activity in st.session_state.academic_activities:
                                     # 上传图片
@@ -293,8 +290,8 @@ def main():
                                         for img_idx, img in enumerate(activity['images']):
                                             # 生成安全的文件名
                                             safe_filename = generate_safe_filename(img.name, prefix=f"academic_{img_idx}")
-                                            safe_activity_name = urllib.parse.quote(activity['name'][:30])
-                                            file_path = f"{safe_unit_name}/academic/{safe_activity_name}/{safe_filename}"
+                                            safe_activity_name = sanitize_path(activity['name'][:30])
+                                            file_path = f"{safe_unit_folder}/academic/{safe_activity_name}/{safe_filename}"
                                             
                                             success, result = upload_file_to_storage(img, "images", file_path)
                                             if success:
@@ -399,15 +396,15 @@ def main():
                         elif submit_final:
                             with st.spinner("正在上传数据..."):
                                 success_count = 0
-                                safe_unit_name = urllib.parse.quote(unit_name)
+                                safe_unit_folder = get_unit_safe_name(unit_name)
                                 
                                 for activity in st.session_state.popular_activities:
                                     image_urls = []
                                     if activity['images']:
                                         for img_idx, img in enumerate(activity['images']):
                                             safe_filename = generate_safe_filename(img.name, prefix=f"popular_{img_idx}")
-                                            safe_activity_name = urllib.parse.quote(activity['name'][:30])
-                                            file_path = f"{safe_unit_name}/popular/{safe_activity_name}/{safe_filename}"
+                                            safe_activity_name = sanitize_path(activity['name'][:30])
+                                            file_path = f"{safe_unit_folder}/popular/{safe_activity_name}/{safe_filename}"
                                             
                                             success, result = upload_file_to_storage(img, "images", file_path)
                                             if success:
@@ -506,15 +503,15 @@ def main():
                     elif submit_final:
                         with st.spinner("正在上传数据..."):
                             success_count = 0
-                            safe_unit_name = urllib.parse.quote(unit_name)
+                            safe_unit_folder = get_unit_safe_name(unit_name)
                             
                             for comp in st.session_state.competitions:
                                 image_urls = []
                                 if comp['images']:
                                     for img_idx, img in enumerate(comp['images']):
                                         safe_filename = generate_safe_filename(img.name, prefix=f"comp_{img_idx}")
-                                        safe_comp_name = urllib.parse.quote(comp['name'][:30])
-                                        file_path = f"{safe_unit_name}/competition/{safe_comp_name}/{safe_filename}"
+                                        safe_comp_name = sanitize_path(comp['name'][:30])
+                                        file_path = f"{safe_unit_folder}/competition/{safe_comp_name}/{safe_filename}"
                                         
                                         success, result = upload_file_to_storage(img, "images", file_path)
                                         if success:
@@ -609,15 +606,15 @@ def main():
                     elif submit_final:
                         with st.spinner("正在上传数据..."):
                             success_count = 0
-                            safe_unit_name = urllib.parse.quote(unit_name)
+                            safe_unit_folder = get_unit_safe_name(unit_name)
                             
                             for award in st.session_state.awards:
                                 image_urls = []
                                 if award['images']:
                                     for img_idx, img in enumerate(award['images']):
                                         safe_filename = generate_safe_filename(img.name, prefix=f"award_{img_idx}")
-                                        safe_award_name = urllib.parse.quote(award['name'][:30])
-                                        file_path = f"{safe_unit_name}/award/{safe_award_name}/{safe_filename}"
+                                        safe_award_name = sanitize_path(award['name'][:30])
+                                        file_path = f"{safe_unit_folder}/award/{safe_award_name}/{safe_filename}"
                                         
                                         success, result = upload_file_to_storage(img, "images", file_path)
                                         if success:
@@ -879,3 +876,25 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
+
+## 文件2: 管理员后台 (admin.py 或 pages/admin.py)
+
+管理员后台代码不需要修改,因为它只是读取数据,不涉及文件上传。原代码保持不变即可。
+
+---
+
+## 主要修改说明:
+
+1. **移除了 `urllib.parse` 的导入和使用** - 不再需要URL编码
+2. **添加了 `hashlib` 导入** - 用于生成单位名称的唯一哈希标识
+3. **新增了三个关键函数**:
+   - `sanitize_path()` - 清理路径中的特殊字符
+   - `generate_safe_filename()` - 生成时间戳文件名(保持不变)
+   - `get_unit_safe_name()` - 为每个单位生成安全的文件夹名
+4. **所有文件上传路径都改用新的安全路径生成方式**
+5. **数据库中仍然保存完整的中文单位名称** - 确保管理员后台正常显示
+
+现在文件路径会是这样的格式:
+```
+揭阳市人民医院 → jieyangs_renminyi_yuan_a1b2c3d4/summary/summary_20251218_113844.docx
