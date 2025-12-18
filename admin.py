@@ -4,9 +4,6 @@ import json
 from datetime import datetime
 from supabase import create_client, Client
 import io
-import requests
-from PIL import Image
-import zipfile
 
 st.set_page_config(
     page_title="揭阳市临床药学分会 - 管理员后台",
@@ -74,17 +71,6 @@ def get_unit_data(table_name, unit_name):
     except Exception as e:
         st.error(f"读取数据失败: {str(e)}")
         return []
-
-def download_image(url):
-    """下载图片"""
-    try:
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            return Image.open(io.BytesIO(response.content))
-        return None
-    except Exception as e:
-        st.warning(f"下载图片失败: {url}")
-        return None
 
 # ==================== 主程序 ====================
 def main():
