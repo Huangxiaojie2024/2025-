@@ -170,9 +170,9 @@ def main():
                     # 生成安全的文件名
                     safe_filename = generate_safe_filename(summary_plan_file.name, prefix="summary")
                     
-                    # 使用URL编码的单位名作为文件夹
+                    # 使用URL编码的单位名和英文文件夹名
                     safe_unit_name = urllib.parse.quote(unit_name)
-                    file_path = f"{safe_unit_name}/年度总结与计划/{safe_filename}"
+                    file_path = f"{safe_unit_name}/summary/{safe_filename}"
                     
                     # 上传文档
                     success, result = upload_file_to_storage(summary_plan_file, "documents", file_path)
@@ -293,8 +293,8 @@ def main():
                                         for img_idx, img in enumerate(activity['images']):
                                             # 生成安全的文件名
                                             safe_filename = generate_safe_filename(img.name, prefix=f"academic_{img_idx}")
-                                            safe_activity_name = urllib.parse.quote(activity['name'][:30])  # 限制长度
-                                            file_path = f"{safe_unit_name}/学术活动/{safe_activity_name}/{safe_filename}"
+                                            safe_activity_name = urllib.parse.quote(activity['name'][:30])
+                                            file_path = f"{safe_unit_name}/academic/{safe_activity_name}/{safe_filename}"
                                             
                                             success, result = upload_file_to_storage(img, "images", file_path)
                                             if success:
@@ -407,7 +407,7 @@ def main():
                                         for img_idx, img in enumerate(activity['images']):
                                             safe_filename = generate_safe_filename(img.name, prefix=f"popular_{img_idx}")
                                             safe_activity_name = urllib.parse.quote(activity['name'][:30])
-                                            file_path = f"{safe_unit_name}/科普活动/{safe_activity_name}/{safe_filename}"
+                                            file_path = f"{safe_unit_name}/popular/{safe_activity_name}/{safe_filename}"
                                             
                                             success, result = upload_file_to_storage(img, "images", file_path)
                                             if success:
@@ -514,7 +514,7 @@ def main():
                                     for img_idx, img in enumerate(comp['images']):
                                         safe_filename = generate_safe_filename(img.name, prefix=f"comp_{img_idx}")
                                         safe_comp_name = urllib.parse.quote(comp['name'][:30])
-                                        file_path = f"{safe_unit_name}/技能竞赛/{safe_comp_name}/{safe_filename}"
+                                        file_path = f"{safe_unit_name}/competition/{safe_comp_name}/{safe_filename}"
                                         
                                         success, result = upload_file_to_storage(img, "images", file_path)
                                         if success:
@@ -617,7 +617,7 @@ def main():
                                     for img_idx, img in enumerate(award['images']):
                                         safe_filename = generate_safe_filename(img.name, prefix=f"award_{img_idx}")
                                         safe_award_name = urllib.parse.quote(award['name'][:30])
-                                        file_path = f"{safe_unit_name}/获奖/{safe_award_name}/{safe_filename}"
+                                        file_path = f"{safe_unit_name}/award/{safe_award_name}/{safe_filename}"
                                         
                                         success, result = upload_file_to_storage(img, "images", file_path)
                                         if success:
