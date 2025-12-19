@@ -72,6 +72,15 @@ def get_unit_data(table_name, unit_name):
         st.error(f"读取数据失败: {str(e)}")
         return []
 
+def get_summary_documents(unit_name):
+    """获取单位的所有年度总结文档"""
+    try:
+        result = supabase.table("summary_documents").select("*").eq("unit_name", unit_name).order("uploaded_at", desc=True).execute()
+        return result.data
+    except Exception as e:
+        st.error(f"读取文档列表失败: {str(e)}")
+        return []
+
 # ==================== 主程序 ====================
 def main():
     # 验证密码
@@ -93,7 +102,7 @@ def main():
     
     # 如果没有数据，尝试从其他表获取单位列表
     if not all_units:
-        for table in ["academic_activities", "popular_activities", "competitions", "awards", "research_projects", "publications"]:
+        for table in ["academic_activities", "popular_activities", "competitions", "awards", "research_projects", "publications", "summary_documents"]:
             data = get_all_data(table)
             if data:
                 all_units.extend([item['unit_name'] for item in data])
@@ -150,9 +159,13 @@ def main():
         submit_data = []
         
         for unit in all_units:
+            # 获取该单位的年度总结文档数量
+            summary_docs = get_summary_documents(unit)
+            summary_count = len(summary_docs)
+            
             row = {
                 '单位名称': unit,
-                '年度总结': '✓' if any(item['unit_name'] == unit for item in work_summary_data) else '✗',
+                '年度总结': f'{summary_count}个版本' if summary_count > 0 else '✗',
                 '学术活动': len([item for item in academic_data if item['unit_name'] == unit]),
                 '科普活动': len([item for item in popular_data if item['unit_name'] == unit]),
                 '技能竞赛': len([item for item in comp_data if item['unit_name'] == unit]),
@@ -165,8 +178,12 @@ def main():
             unit_summary = [item for item in work_summary_data if item['unit_name'] == unit]
             if unit_summary:
                 row['最后更新'] = unit_summary[0].get('updated_at', '未知')[:19]
+                row['联系人'] = unit_summary[0].get('contact_person', '未填写')
+                row['联系电话'] = unit_summary[0].get('contact_phone', '未填写')
             else:
                 row['最后更新'] = '未提交'
+                row['联系人'] = '未填写'
+                row['联系电话'] = '未填写'
             
             submit_data.append(row)
         
@@ -199,10 +216,24 @@ def main():
                     st.write(f"**联系电话：** {info.get('contact_phone', '未填写')}")
                     st.write(f"**最后更新：** {info.get('updated_at', '未知')[:19]}")
                     
-                    if info.get('summary_url'):
-                        st.markdown(f"**年度总结与计划：** [📄 下载文档]({info['summary_url']})")
+                    st.markdown("---")
+                    
+                    # 获取所有版本的文档
+                    summary_docs = get_summary_documents(selected_unit)
+                    
+                    if summary_docs:
+                        st.success(f"✅ 该单位已上传 {len(summary_docs)} 个版本的年度总结与计划")
+                        
+                        for idx, doc in enumerate(summary_docs, 1):
+                            with st.expander(f"📄 版本 {idx} - {doc.get('uploaded_at', '未知')[:19]}", expanded=(idx==1)):
+                                st.write(f"**上传时间：** {doc.get('uploaded_at', '未知')[:19]}")
+                                st.write(f"**原文件名：** {doc.get('original_filename', '未知')}")
+                                st.markdown(f"**下载链接：** [📄 点击下载]({doc['document_url']})")
+                                
+                                if idx == 1:
+                                    st.info("⭐ 当前最新版本")
                     else:
-                        st.info("未上传年度总结与计划")
+                        st.info("该单位尚未上传年度总结与计划")
                 else:
                     st.info("该单位尚未提交年度总结与计划")
             
@@ -210,12 +241,16 @@ def main():
             with tabs[1]:
                 academic = get_unit_data("academic_activities", selected_unit)
                 if academic:
+                    st.success(f"✅ 共 {len(academic)} 条学术活动记录")
                     for idx, act in enumerate(academic, 1):
                         with st.expander(f"{idx}. {act['activity_name']} ({act['activity_date']})"):
-                            st.write(f"**简介：** {act['description']}")
+                            st.write(f"**活动日期：** {act['activity_date']}")
+                            st.write(f"**活动名称：** {act['activity_name']}")
+                            st.write(f"**活动简介：** {act['description']}")
+                            
                             image_urls = json.loads(act.get('image_urls', '[]'))
                             if image_urls:
-                                st.write(f"**图片：** {len(image_urls)}张")
+                                st.write(f"**活动图片：** {len(image_urls)}张")
                                 cols = st.columns(min(len(image_urls), 3))
                                 for img_idx, img_url in enumerate(image_urls):
                                     with cols[img_idx % 3]:
@@ -230,12 +265,16 @@ def main():
             with tabs[2]:
                 popular = get_unit_data("popular_activities", selected_unit)
                 if popular:
+                    st.success(f"✅ 共 {len(popular)} 条科普活动记录")
                     for idx, act in enumerate(popular, 1):
                         with st.expander(f"{idx}. {act['activity_name']} ({act['activity_date']})"):
-                            st.write(f"**简介：** {act['description']}")
+                            st.write(f"**活动日期：** {act['activity_date']}")
+                            st.write(f"**活动名称：** {act['activity_name']}")
+                            st.write(f"**活动简介：** {act['description']}")
+                            
                             image_urls = json.loads(act.get('image_urls', '[]'))
                             if image_urls:
-                                st.write(f"**图片：** {len(image_urls)}张")
+                                st.write(f"**活动图片：** {len(image_urls)}张")
                                 cols = st.columns(min(len(image_urls), 3))
                                 for img_idx, img_url in enumerate(image_urls):
                                     with cols[img_idx % 3]:
@@ -250,12 +289,16 @@ def main():
             with tabs[3]:
                 comps = get_unit_data("competitions", selected_unit)
                 if comps:
+                    st.success(f"✅ 共 {len(comps)} 条技能竞赛记录")
                     for idx, comp in enumerate(comps, 1):
                         with st.expander(f"{idx}. {comp['competition_name']} ({comp['competition_date']})"):
-                            st.write(f"**简介：** {comp['description']}")
+                            st.write(f"**竞赛日期：** {comp['competition_date']}")
+                            st.write(f"**竞赛名称：** {comp['competition_name']}")
+                            st.write(f"**竞赛简介：** {comp['description']}")
+                            
                             image_urls = json.loads(comp.get('image_urls', '[]'))
                             if image_urls:
-                                st.write(f"**图片：** {len(image_urls)}张")
+                                st.write(f"**竞赛图片：** {len(image_urls)}张")
                                 cols = st.columns(min(len(image_urls), 3))
                                 for img_idx, img_url in enumerate(image_urls):
                                     with cols[img_idx % 3]:
@@ -270,12 +313,16 @@ def main():
             with tabs[4]:
                 awards = get_unit_data("awards", selected_unit)
                 if awards:
+                    st.success(f"✅ 共 {len(awards)} 条获奖记录")
                     for idx, award in enumerate(awards, 1):
                         with st.expander(f"{idx}. {award['award_name']} ({award['award_date']})"):
+                            st.write(f"**获奖日期：** {award['award_date']}")
+                            st.write(f"**奖项名称：** {award['award_name']}")
                             st.write(f"**颁奖单位：** {award.get('award_organization', '未填写')}")
+                            
                             image_urls = json.loads(award.get('image_urls', '[]'))
                             if image_urls:
-                                st.write(f"**图片：** {len(image_urls)}张")
+                                st.write(f"**获奖图片：** {len(image_urls)}张")
                                 cols = st.columns(min(len(image_urls), 3))
                                 for img_idx, img_url in enumerate(image_urls):
                                     with cols[img_idx % 3]:
@@ -290,6 +337,7 @@ def main():
             with tabs[5]:
                 projects = get_unit_data("research_projects", selected_unit)
                 if projects:
+                    st.success(f"✅ 共 {len(projects)} 条科研立项记录")
                     df_data = []
                     for proj in projects:
                         df_data.append({
@@ -310,6 +358,7 @@ def main():
             with tabs[6]:
                 pubs = get_unit_data("publications", selected_unit)
                 if pubs:
+                    st.success(f"✅ 共 {len(pubs)} 条论文发表记录")
                     df_data = []
                     for pub in pubs:
                         df_data.append({
@@ -331,10 +380,42 @@ def main():
         
         category = st.selectbox(
             "选择类别",
-            ["🔬 科研立项", "📚 论文发表", "🎓 学术活动", "📢 科普活动", "🏆 技能竞赛", "🥇 获奖情况"]
+            ["📄 年度总结文档", "🔬 科研立项", "📚 论文发表", "🎓 学术活动", "📢 科普活动", "🏆 技能竞赛", "🥇 获奖情况"]
         )
         
-        if category == "🔬 科研立项":
+        if category == "📄 年度总结文档":
+            st.subheader("各单位年度总结文档汇总")
+            
+            all_docs = get_all_data("summary_documents")
+            
+            if all_docs:
+                # 按单位分组显示
+                units_with_docs = list(set([doc['unit_name'] for doc in all_docs]))
+                
+                for unit in sorted(units_with_docs):
+                    unit_docs = [doc for doc in all_docs if doc['unit_name'] == unit]
+                    
+                    with st.expander(f"🏥 {unit} - {len(unit_docs)}个版本", expanded=False):
+                        for idx, doc in enumerate(sorted(unit_docs, key=lambda x: x['uploaded_at'], reverse=True), 1):
+                            col1, col2 = st.columns([7, 3])
+                            
+                            with col1:
+                                st.write(f"**版本 {idx}**")
+                                st.write(f"上传时间：{doc.get('uploaded_at', '未知')[:19]}")
+                                st.write(f"原文件名：{doc.get('original_filename', '未知')}")
+                            
+                            with col2:
+                                st.markdown(f"[📄 下载文档]({doc['document_url']})")
+                                if idx == 1:
+                                    st.success("最新版本")
+                            
+                            st.markdown("---")
+                
+                st.info(f"共 {len(units_with_docs)} 个单位提交了年度总结，总计 {len(all_docs)} 个文档版本")
+            else:
+                st.info("暂无年度总结文档")
+        
+        elif category == "🔬 科研立项":
             projects = get_all_data("research_projects")
             if projects:
                 df_data = []
@@ -391,6 +472,8 @@ def main():
                     if category == "🥇 获奖情况":
                         title = f"{idx}. {unit} - {item['award_name']} ({item['award_date']})"
                         with st.expander(title):
+                            st.write(f"**获奖日期：** {item['award_date']}")
+                            st.write(f"**奖项名称：** {item['award_name']}")
                             st.write(f"**颁奖单位：** {item.get('award_organization', '未填写')}")
                             
                             image_urls = json.loads(item.get('image_urls', '[]'))
@@ -408,7 +491,9 @@ def main():
                         title = f"{idx}. {unit} - {item['competition_name']} ({item['competition_date']})"
                         description = item['description']
                         with st.expander(title):
-                            st.write(f"**简介：** {description}")
+                            st.write(f"**竞赛日期：** {item['competition_date']}")
+                            st.write(f"**竞赛名称：** {item['competition_name']}")
+                            st.write(f"**竞赛简介：** {description}")
                             
                             image_urls = json.loads(item.get('image_urls', '[]'))
                             if image_urls:
@@ -425,7 +510,9 @@ def main():
                         title = f"{idx}. {unit} - {item['activity_name']} ({item['activity_date']})"
                         description = item['description']
                         with st.expander(title):
-                            st.write(f"**简介：** {description}")
+                            st.write(f"**活动日期：** {item['activity_date']}")
+                            st.write(f"**活动名称：** {item['activity_name']}")
+                            st.write(f"**活动简介：** {description}")
                             
                             image_urls = json.loads(item.get('image_urls', '[]'))
                             if image_urls:
@@ -446,13 +533,27 @@ def main():
     elif view_mode == "📥 数据导出":
         st.header("📥 数据导出")
         
-        st.info("💡 导出的Excel将包含所有数据和图片链接")
+        st.info("💡 导出的Excel将包含所有数据和图片链接，包括多版本的年度总结文档信息")
         
         if st.button("📊 生成完整Excel汇总表（含图片链接）", type="primary"):
             with st.spinner("正在生成Excel文件..."):
                 try:
                     output = io.BytesIO()
                     with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                        
+                        # 年度总结文档（新增）
+                        all_summary_docs = get_all_data("summary_documents")
+                        if all_summary_docs:
+                            df_data = []
+                            for doc in all_summary_docs:
+                                df_data.append({
+                                    '单位名称': doc['unit_name'],
+                                    '原文件名': doc.get('original_filename', '未知'),
+                                    '上传时间': doc.get('uploaded_at', '未知')[:19],
+                                    '文档链接': doc['document_url']
+                                })
+                            pd.DataFrame(df_data).to_excel(writer, sheet_name='年度总结文档', index=False)
+                        
                         # 科研立项
                         projects = get_all_data("research_projects")
                         if projects:
@@ -554,9 +655,20 @@ def main():
                         work_summary = get_all_data("work_summary")
                         submit_data = []
                         for unit in all_units:
+                            # 统计年度总结文档版本数
+                            unit_summary_docs = [doc for doc in all_summary_docs if doc['unit_name'] == unit] if all_summary_docs else []
+                            summary_count = len(unit_summary_docs)
+                            
+                            # 获取联系信息
+                            unit_info = [item for item in work_summary if item['unit_name'] == unit]
+                            contact_person = unit_info[0].get('contact_person', '未填写') if unit_info else '未填写'
+                            contact_phone = unit_info[0].get('contact_phone', '未填写') if unit_info else '未填写'
+                            
                             submit_data.append({
                                 '单位名称': unit,
-                                '年度总结': '✓' if any(item['unit_name'] == unit for item in work_summary) else '✗',
+                                '联系人': contact_person,
+                                '联系电话': contact_phone,
+                                '年度总结版本数': summary_count,
                                 '学术活动': len([item for item in academic if item['unit_name'] == unit]) if academic else 0,
                                 '科普活动': len([item for item in popular if item['unit_name'] == unit]) if popular else 0,
                                 '技能竞赛': len([item for item in comps if item['unit_name'] == unit]) if comps else 0,
@@ -573,7 +685,7 @@ def main():
                         file_name=f"揭阳市临床药学分会_数据汇总_{datetime.now().strftime('%Y%m%d')}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
-                    st.success("✅ Excel文件生成成功！图片链接和颁奖单位信息已包含在各个工作表中")
+                    st.success("✅ Excel文件生成成功！包含年度总结文档、图片链接和颁奖单位信息")
                 except Exception as e:
                     st.error(f"生成Excel时出错：{str(e)}")
 
