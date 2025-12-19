@@ -68,6 +68,15 @@ def get_unit_safe_name(unit_name):
     safe_name = sanitize_path(unit_name)
     return f"{safe_name}_{unit_hash}"
 
+def validate_phone(phone):
+    """验证手机号是否为11位数字"""
+    if not phone:
+        return False
+    # 移除所有空格和横线
+    phone = phone.replace(" ", "").replace("-", "")
+    # 检查是否为11位数字
+    return len(phone) == 11 and phone.isdigit()
+
 # ==================== 数据库操作函数 ====================
 
 def save_to_supabase(table_name, data):
@@ -131,12 +140,36 @@ def upload_file_to_storage(file, bucket_name, file_path):
     except Exception as e:
         return False, str(e)
 
+def delete_file_from_storage(bucket_name, file_path):
+    """从Supabase Storage删除文件"""
+    try:
+        # 从URL中提取路径
+        if file_path.startswith('http'):
+            # 提取路径部分
+            parts = file_path.split('/storage/v1/object/public/' + bucket_name + '/')
+            if len(parts) > 1:
+                file_path = parts[1]
+        
+        result = supabase.storage.from_(bucket_name).remove([file_path])
+        return True, result
+    except Exception as e:
+        return False, str(e)
+
 # ==================== 数据加载函数 ====================
 
 def load_unit_summary(unit_name):
     """加载单位的年度总结数据"""
     data = get_from_supabase("work_summary", unit_name)
     return data[0] if data else None
+
+def load_summary_documents(unit_name):
+    """加载单位的所有年度总结文档"""
+    try:
+        result = supabase.table("summary_documents").select("*").eq("unit_name", unit_name).order("uploaded_at", desc=True).execute()
+        return result.data
+    except Exception as e:
+        st.error(f"读取文档列表失败: {str(e)}")
+        return []
 
 def load_activities(table_name, unit_name):
     """加载活动数据"""
@@ -150,7 +183,16 @@ def main():
     
     # 单位信息
     st.header("📋 单位信息")
-    unit_name = st.text_input("请输入单位名称*", placeholder="例如：揭阳市人民医院", key="unit_name_input")
+    
+    # 添加备注说明
+    st.info("💡 **重要提示：** 请各成员单位指定专人负责本单位信息的填报与维护工作，确保数据准确性和及时性。建议由药学部门负责人或指定联络员统一管理账号和数据提交。")
+    
+    unit_name = st.text_input(
+        "请输入单位名称*", 
+        placeholder="例如：揭阳市人民医院", 
+        key="unit_name_input",
+        help="请填写单位全称"
+    )
     
     if not unit_name:
         st.warning("⚠️ 请先填写单位名称后再继续填报")
@@ -163,8 +205,24 @@ def main():
     default_contact = summary_data.get('contact_person', '') if summary_data else ''
     default_phone = summary_data.get('contact_phone', '') if summary_data else ''
     
-    contact_person = st.text_input("联系人*", value=default_contact, placeholder="请输入联系人姓名")
-    contact_phone = st.text_input("联系电话*", value=default_phone, placeholder="请输入联系电话")
+    contact_person = st.text_input(
+        "联系人*", 
+        value=default_contact, 
+        placeholder="请输入联系人姓名",
+        help="请填写负责本单位数据填报的联系人"
+    )
+    
+    contact_phone = st.text_input(
+        "联系电话*", 
+        value=default_phone, 
+        placeholder="请输入11位手机号码",
+        max_chars=11,
+        help="请输入11位手机号码"
+    )
+    
+    # 验证手机号
+    if contact_phone and not validate_phone(contact_phone):
+        st.error("❌ 请输入正确的11位手机号码")
     
     # 显示转换后的路径（用于调试）
     with st.expander("🔍 调试信息（可选查看）"):
@@ -188,16 +246,41 @@ def main():
     # ========== 年度总结与计划 ==========
     with tabs[0]:
         st.subheader("2025年度总结与2026年计划")
-        st.info("💡 提示：请将年度总结和计划合并为一个Word文档上传。每次上传都会保存为新版本，不会覆盖旧文件。")
+        st.info("💡 提示：请将年度总结和计划合并为一个Word文档上传。支持上传多个版本，所有版本都会被保存。")
         
         # 显示已上传的文档列表
-        if summary_data and summary_data.get('summary_url'):
-            st.success("✅ 您已上传过年度总结与计划")
+        uploaded_docs = load_summary_documents(unit_name)
+        
+        if uploaded_docs:
+            st.success(f"✅ 您已上传 {len(uploaded_docs)} 个版本的年度总结与计划")
             with st.expander("📄 查看已上传的文档", expanded=True):
-                st.write(f"**联系人：** {summary_data.get('contact_person', '未填写')}")
-                st.write(f"**联系电话：** {summary_data.get('contact_phone', '未填写')}")
-                st.write(f"**最后更新：** {summary_data.get('updated_at', '未知')[:19]}")
-                st.markdown(f"**文档链接：** [📄 下载文档]({summary_data['summary_url']})")
+                for idx, doc in enumerate(uploaded_docs, 1):
+                    col1, col2, col3 = st.columns([6, 2, 2])
+                    
+                    with col1:
+                        st.write(f"**版本 {idx}**")
+                        st.write(f"上传时间：{doc.get('uploaded_at', '未知')[:19]}")
+                        st.write(f"原文件名：{doc.get('original_filename', '未知')}")
+                        st.markdown(f"[📄 下载文档]({doc['document_url']})")
+                    
+                    with col2:
+                        if idx == 1:
+                            st.success("当前版本")
+                    
+                    with col3:
+                        if st.button(f"🗑️ 删除", key=f"del_doc_{doc['id']}"):
+                            # 删除存储中的文件
+                            file_success, _ = delete_file_from_storage("documents", doc['document_url'])
+                            # 删除数据库记录
+                            db_success, _ = delete_from_supabase("summary_documents", doc['id'])
+                            
+                            if file_success and db_success:
+                                st.success("删除成功！")
+                                st.rerun()
+                            else:
+                                st.error("删除失败，请重试")
+                    
+                    st.markdown("---")
         
         summary_plan_file = st.file_uploader(
             "上传年度总结与计划文档（Word文档）*",
@@ -206,9 +289,11 @@ def main():
             help="支持上传多次，每次上传都会保存为新版本"
         )
         
-        if st.button("💾 保存年度总结与计划", key="save_summary_plan", type="primary"):
+        if st.button("💾 上传年度总结与计划", key="save_summary_plan", type="primary"):
             if not contact_person or not contact_phone:
                 st.error("❌ 请填写完整的联系人和联系电话")
+            elif not validate_phone(contact_phone):
+                st.error("❌ 请输入正确的11位手机号码")
             elif summary_plan_file:
                 with st.spinner("正在上传文档..."):
                     try:
@@ -225,35 +310,43 @@ def main():
                         if success:
                             document_url = result
                             
-                            # 保存记录到数据库
-                            data = {
+                            # 保存文档记录到summary_documents表
+                            doc_data = {
+                                "unit_name": unit_name,
+                                "document_url": document_url,
+                                "original_filename": summary_plan_file.name,
+                                "uploaded_at": datetime.now().isoformat()
+                            }
+                            doc_success, doc_result = save_to_supabase("summary_documents", doc_data)
+                            
+                            # 更新work_summary表的联系信息和最新文档URL
+                            summary_update_data = {
                                 "unit_name": unit_name,
                                 "contact_person": contact_person,
                                 "contact_phone": contact_phone,
-                                "summary_url": document_url,
-                                "plan_url": None,
+                                "summary_url": document_url,  # 保存最新的文档URL
                                 "updated_at": datetime.now().isoformat()
                             }
                             
                             # 检查是否已存在记录
                             existing = get_from_supabase("work_summary", unit_name)
                             if existing:
-                                success, result = update_supabase("work_summary", data, "unit_name", unit_name)
+                                success, result = update_supabase("work_summary", summary_update_data, "unit_name", unit_name)
                             else:
-                                success, result = save_to_supabase("work_summary", data)
+                                success, result = save_to_supabase("work_summary", summary_update_data)
                             
-                            if success:
-                                st.success("✅ 保存成功！文档已保存为新版本")
+                            if success and doc_success:
+                                st.success("✅ 上传成功！文档已保存为新版本")
                                 st.info(f"📄 原文件名：{summary_plan_file.name}")
                                 st.rerun()
                             else:
-                                st.error(f"❌ 数据库保存失败: {result}")
+                                st.error(f"❌ 数据库保存失败")
                         else:
                             st.error(f"❌ 文档上传失败: {result}")
                     except Exception as e:
                         st.error(f"❌ 上传过程出错: {str(e)}")
             else:
-                st.warning("⚠️ 请上传年度总结与计划文档")
+                st.warning("⚠️ 请选择要上传的文档")
     
     # ========== 学术活动 ==========
     with tabs[1]:
@@ -1106,14 +1199,15 @@ def main():
         
         project_count = len(get_from_supabase("research_projects", unit_name))
         pub_count = len(get_from_supabase("publications", unit_name))
-        summary_count = 1 if load_unit_summary(unit_name) else 0
+        summary_docs = load_summary_documents(unit_name)
+        summary_count = len(summary_docs)
         
         with col1:
             st.metric("科研立项", project_count)
         with col2:
             st.metric("论文发表", pub_count)
         with col3:
-            st.metric("年度总结", "已提交" if summary_count else "未提交")
+            st.metric("年度总结版本", summary_count)
         
         st.markdown("---")
         st.success("✅ 所有数据已保存到云端数据库，管理员可实时查看")
