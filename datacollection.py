@@ -27,19 +27,11 @@ except Exception as e:
 # ==================== 文件名清理函数 ====================
 
 def chinese_to_pinyin_simple(text):
-    """
-    简单的中文转拼音方法（使用哈希）
-    因为完整拼音库可能不可用，我们用更简单的方法
-    """
-    # 移除所有非字母数字的字符
+    """简单的中文转拼音方法（使用哈希）"""
     cleaned = re.sub(r'[^\w]', '', text)
-    
-    # 如果有英文字母和数字，保留它们
     ascii_part = re.sub(r'[^\x00-\x7F]', '', cleaned)
     
-    # 对于中文部分，生成一个短哈希
     if len(ascii_part) < len(cleaned):
-        # 有中文字符
         hash_obj = hashlib.md5(text.encode('utf-8'))
         hash_str = hash_obj.hexdigest()[:8]
         if ascii_part:
@@ -47,51 +39,33 @@ def chinese_to_pinyin_simple(text):
         else:
             return f"unit_{hash_str}"
     else:
-        # 纯英文
         return ascii_part if ascii_part else "unit"
 
 def sanitize_path(path_str):
-    """
-    清理路径字符串，将中文转换为安全的ASCII字符
-    """
-    # 先尝试转换中文
+    """清理路径字符串"""
     safe_str = chinese_to_pinyin_simple(path_str)
-    
-    # 再次清理，确保只有安全字符
     safe_str = re.sub(r'[^\w\-]', '_', safe_str)
     safe_str = re.sub(r'_+', '_', safe_str)
     safe_str = safe_str.strip('_')
     
-    # 限制长度
     if len(safe_str) > 50:
         safe_str = safe_str[:50]
     
-    # 如果为空，使用默认值
     if not safe_str:
         safe_str = f"file_{datetime.now().strftime('%Y%m%d')}"
     
     return safe_str
 
 def generate_safe_filename(original_name, prefix="file"):
-    """
-    生成安全的文件名
-    使用时间戳 + 原文件扩展名
-    """
+    """生成安全的文件名（带版本号）"""
     ext = os.path.splitext(original_name)[1]
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:17]
     return f"{prefix}_{timestamp}{ext}"
 
 def get_unit_safe_name(unit_name):
-    """
-    为单位名称生成安全的文件夹名（纯ASCII）
-    """
-    # 生成哈希作为唯一标识
+    """为单位名称生成安全的文件夹名"""
     unit_hash = hashlib.md5(unit_name.encode('utf-8')).hexdigest()[:8]
-    
-    # 转换中文为安全字符
     safe_name = sanitize_path(unit_name)
-    
-    # 组合
     return f"{safe_name}_{unit_hash}"
 
 # ==================== 数据库操作函数 ====================
@@ -103,7 +77,6 @@ def save_to_supabase(table_name, data):
         return True, result
     except Exception as e:
         error_msg = str(e)
-        # 如果是RLS错误，给出更友好的提示
         if "row-level security policy" in error_msg.lower() or "violates" in error_msg.lower():
             return False, "数据库权限配置错误，请联系管理员检查RLS策略"
         return False, error_msg
@@ -131,26 +104,25 @@ def get_from_supabase(table_name, unit_name=None):
         st.error(f"读取数据失败: {str(e)}")
         return []
 
+def delete_from_supabase(table_name, record_id):
+    """从Supabase删除数据"""
+    try:
+        result = supabase.table(table_name).delete().eq("id", record_id).execute()
+        return True, result
+    except Exception as e:
+        return False, str(e)
+
 def upload_file_to_storage(file, bucket_name, file_path):
-    """上传文件到Supabase Storage"""
+    """上传文件到Supabase Storage（不覆盖，使用版本号）"""
     try:
         file_bytes = file.getvalue()
-        
-        # 确保路径是纯ASCII
         file_path = file_path.encode('ascii', 'ignore').decode('ascii')
         
-        # 尝试上传，如果文件已存在则覆盖
-        try:
-            # 先尝试删除旧文件（如果存在）
-            supabase.storage.from_(bucket_name).remove([file_path])
-        except:
-            pass  # 文件不存在，忽略错误
-        
-        # 上传新文件
+        # 直接上传新文件（带时间戳，不会覆盖）
         result = supabase.storage.from_(bucket_name).upload(
             file_path, 
             file_bytes,
-            {"content-type": file.type, "upsert": "true"}
+            {"content-type": file.type, "upsert": "false"}
         )
         
         # 获取公共URL
@@ -158,6 +130,17 @@ def upload_file_to_storage(file, bucket_name, file_path):
         return True, public_url
     except Exception as e:
         return False, str(e)
+
+# ==================== 数据加载函数 ====================
+
+def load_unit_summary(unit_name):
+    """加载单位的年度总结数据"""
+    data = get_from_supabase("work_summary", unit_name)
+    return data[0] if data else None
+
+def load_activities(table_name, unit_name):
+    """加载活动数据"""
+    return get_from_supabase(table_name, unit_name)
 
 # ==================== 主程序 ====================
 
@@ -168,12 +151,20 @@ def main():
     # 单位信息
     st.header("📋 单位信息")
     unit_name = st.text_input("请输入单位名称*", placeholder="例如：揭阳市人民医院", key="unit_name_input")
-    contact_person = st.text_input("联系人*", placeholder="请输入联系人姓名")
-    contact_phone = st.text_input("联系电话*", placeholder="请输入联系电话")
     
     if not unit_name:
         st.warning("⚠️ 请先填写单位名称后再继续填报")
         return
+    
+    # 加载该单位的历史数据
+    summary_data = load_unit_summary(unit_name)
+    
+    # 预填联系信息
+    default_contact = summary_data.get('contact_person', '') if summary_data else ''
+    default_phone = summary_data.get('contact_phone', '') if summary_data else ''
+    
+    contact_person = st.text_input("联系人*", value=default_contact, placeholder="请输入联系人姓名")
+    contact_phone = st.text_input("联系电话*", value=default_phone, placeholder="请输入联系电话")
     
     # 显示转换后的路径（用于调试）
     with st.expander("🔍 调试信息（可选查看）"):
@@ -197,12 +188,22 @@ def main():
     # ========== 年度总结与计划 ==========
     with tabs[0]:
         st.subheader("2025年度总结与2026年计划")
-        st.info("💡 提示：请将年度总结和计划合并为一个Word文档上传")
+        st.info("💡 提示：请将年度总结和计划合并为一个Word文档上传。每次上传都会保存为新版本，不会覆盖旧文件。")
+        
+        # 显示已上传的文档列表
+        if summary_data and summary_data.get('summary_url'):
+            st.success("✅ 您已上传过年度总结与计划")
+            with st.expander("📄 查看已上传的文档", expanded=True):
+                st.write(f"**联系人：** {summary_data.get('contact_person', '未填写')}")
+                st.write(f"**联系电话：** {summary_data.get('contact_phone', '未填写')}")
+                st.write(f"**最后更新：** {summary_data.get('updated_at', '未知')[:19]}")
+                st.markdown(f"**文档链接：** [📄 下载文档]({summary_data['summary_url']})")
         
         summary_plan_file = st.file_uploader(
             "上传年度总结与计划文档（Word文档）*",
             type=['doc', 'docx'],
-            key="summary_plan"
+            key="summary_plan",
+            help="支持上传多次，每次上传都会保存为新版本"
         )
         
         if st.button("💾 保存年度总结与计划", key="save_summary_plan", type="primary"):
@@ -211,10 +212,8 @@ def main():
             elif summary_plan_file:
                 with st.spinner("正在上传文档..."):
                     try:
-                        # 生成安全的文件名
+                        # 生成带时间戳的安全文件名（不会覆盖）
                         safe_filename = generate_safe_filename(summary_plan_file.name, prefix="summary")
-                        
-                        # 使用安全的单位名称作为文件夹名
                         safe_unit_folder = get_unit_safe_name(unit_name)
                         file_path = f"{safe_unit_folder}/summary/{safe_filename}"
                         
@@ -244,11 +243,11 @@ def main():
                                 success, result = save_to_supabase("work_summary", data)
                             
                             if success:
-                                st.success("✅ 保存成功！")
+                                st.success("✅ 保存成功！文档已保存为新版本")
                                 st.info(f"📄 原文件名：{summary_plan_file.name}")
+                                st.rerun()
                             else:
                                 st.error(f"❌ 数据库保存失败: {result}")
-                                st.warning("💡 请联系管理员检查数据库表的RLS（行级安全）策略设置")
                         else:
                             st.error(f"❌ 文档上传失败: {result}")
                     except Exception as e:
@@ -260,21 +259,54 @@ def main():
     with tabs[1]:
         st.subheader("学术活动登记")
         
+        # 加载已提交的数据
+        submitted_academic = load_activities("academic_activities", unit_name)
+        
+        # 显示已提交的活动
+        if submitted_academic:
+            st.success(f"✅ 您已提交 {len(submitted_academic)} 条学术活动")
+            with st.expander("📋 查看已提交的学术活动", expanded=False):
+                for idx, activity in enumerate(submitted_academic, 1):
+                    st.markdown(f"### {idx}. {activity['activity_name']} ({activity['activity_date']})")
+                    st.write(f"**简介：** {activity['description']}")
+                    
+                    # 显示图片
+                    image_urls = json.loads(activity.get('image_urls', '[]'))
+                    if image_urls:
+                        st.write(f"**图片：** {len(image_urls)}张")
+                        cols = st.columns(min(len(image_urls), 3))
+                        for img_idx, img_url in enumerate(image_urls):
+                            with cols[img_idx % 3]:
+                                try:
+                                    st.image(img_url, use_container_width=True)
+                                except:
+                                    st.markdown(f"[🖼️ 查看图片]({img_url})")
+                    
+                    # 删除按钮
+                    if st.button(f"🗑️ 删除此条记录", key=f"del_submitted_academic_{activity['id']}"):
+                        success, _ = delete_from_supabase("academic_activities", activity['id'])
+                        if success:
+                            st.success("删除成功！")
+                            st.rerun()
+                        else:
+                            st.error("删除失败，请重试")
+                    st.markdown("---")
+        
+        # 待提交列表
         if 'academic_activities' not in st.session_state:
             st.session_state.academic_activities = []
         if 'academic_form_key' not in st.session_state:
             st.session_state.academic_form_key = 0
         
-        # 显示已添加的活动（带预览）
+        # 显示待提交的活动
         if st.session_state.academic_activities:
-            st.markdown("### 📋 已添加的学术活动")
+            st.markdown("### 📝 待提交的学术活动")
             for idx, activity in enumerate(st.session_state.academic_activities):
-                with st.expander(f"✅ {idx+1}. {activity['name']} - {activity['date']}", expanded=False):
+                with st.expander(f"⏳ {idx+1}. {activity['name']} - {activity['date']}", expanded=False):
                     st.write(f"**活动日期：** {activity['date']}")
                     st.write(f"**活动名称：** {activity['name']}")
                     st.write(f"**活动简介：** {activity['description']}")
                     
-                    # 预览图片
                     if activity['images']:
                         st.write(f"**活动图片：** {len(activity['images'])}张")
                         cols = st.columns(min(len(activity['images']), 3))
@@ -330,17 +362,14 @@ def main():
                             st.success(f"✅ 已添加：{activity_name}，请继续添加下一条")
                             st.rerun()
                         elif submit_final:
-                            # 提交所有数据
                             with st.spinner("正在上传数据..."):
                                 success_count = 0
                                 safe_unit_folder = get_unit_safe_name(unit_name)
                                 
                                 for activity in st.session_state.academic_activities:
-                                    # 上传图片
                                     image_urls = []
                                     if activity['images']:
                                         for img_idx, img in enumerate(activity['images']):
-                                            # 生成安全的文件名
                                             safe_filename = generate_safe_filename(img.name, prefix=f"academic_{img_idx}")
                                             safe_activity_name = sanitize_path(activity['name'][:30])
                                             file_path = f"{safe_unit_folder}/academic/{safe_activity_name}/{safe_filename}"
@@ -349,7 +378,6 @@ def main():
                                             if success:
                                                 image_urls.append(result)
                                     
-                                    # 保存到数据库
                                     data = {
                                         "unit_name": unit_name,
                                         "activity_date": activity['date'],
@@ -368,8 +396,7 @@ def main():
                                     st.session_state.academic_form_key = 0
                                     st.rerun()
                                 else:
-                                    st.warning(f"⚠️ 成功提交{success_count}条，失败{len(st.session_state.academic_activities) - success_count}条")
-                                    st.error("部分数据提交失败，可能是数据库权限问题，请联系管理员")
+                                    st.warning(f"⚠️ 成功提交{success_count}条")
                 else:
                     st.error("❌ 请填写所有必填项（标有*）")
     
@@ -377,21 +404,50 @@ def main():
     with tabs[2]:
         st.subheader("科普活动登记")
         
+        # 加载已提交的数据
+        submitted_popular = load_activities("popular_activities", unit_name)
+        
+        # 显示已提交的活动
+        if submitted_popular:
+            st.success(f"✅ 您已提交 {len(submitted_popular)} 条科普活动")
+            with st.expander("📋 查看已提交的科普活动", expanded=False):
+                for idx, activity in enumerate(submitted_popular, 1):
+                    st.markdown(f"### {idx}. {activity['activity_name']} ({activity['activity_date']})")
+                    st.write(f"**简介：** {activity['description']}")
+                    
+                    image_urls = json.loads(activity.get('image_urls', '[]'))
+                    if image_urls:
+                        st.write(f"**图片：** {len(image_urls)}张")
+                        cols = st.columns(min(len(image_urls), 3))
+                        for img_idx, img_url in enumerate(image_urls):
+                            with cols[img_idx % 3]:
+                                try:
+                                    st.image(img_url, use_container_width=True)
+                                except:
+                                    st.markdown(f"[🖼️ 查看图片]({img_url})")
+                    
+                    if st.button(f"🗑️ 删除此条记录", key=f"del_submitted_popular_{activity['id']}"):
+                        success, _ = delete_from_supabase("popular_activities", activity['id'])
+                        if success:
+                            st.success("删除成功！")
+                            st.rerun()
+                        else:
+                            st.error("删除失败，请重试")
+                    st.markdown("---")
+        
         if 'popular_activities' not in st.session_state:
             st.session_state.popular_activities = []
         if 'popular_form_key' not in st.session_state:
             st.session_state.popular_form_key = 0
         
-        # 显示已添加的活动（带预览）
         if st.session_state.popular_activities:
-            st.markdown("### 📋 已添加的科普活动")
+            st.markdown("### 📝 待提交的科普活动")
             for idx, activity in enumerate(st.session_state.popular_activities):
-                with st.expander(f"✅ {idx+1}. {activity['name']} - {activity['date']}", expanded=False):
+                with st.expander(f"⏳ {idx+1}. {activity['name']} - {activity['date']}", expanded=False):
                     st.write(f"**活动日期：** {activity['date']}")
                     st.write(f"**活动名称：** {activity['name']}")
                     st.write(f"**活动简介：** {activity['description']}")
                     
-                    # 预览图片
                     if activity['images']:
                         st.write(f"**活动图片：** {len(activity['images'])}张")
                         cols = st.columns(min(len(activity['images']), 3))
@@ -404,7 +460,6 @@ def main():
                         st.rerun()
             st.markdown("---")
         
-        # 添加新活动表单
         with st.form(key=f"popular_form_{st.session_state.popular_form_key}"):
             st.markdown("### ➕ 添加科普活动")
             
@@ -489,21 +544,50 @@ def main():
     with tabs[3]:
         st.subheader("技能竞赛登记")
         
+        # 加载已提交的数据
+        submitted_comps = load_activities("competitions", unit_name)
+        
+        # 显示已提交的竞赛
+        if submitted_comps:
+            st.success(f"✅ 您已提交 {len(submitted_comps)} 条技能竞赛")
+            with st.expander("📋 查看已提交的技能竞赛", expanded=False):
+                for idx, comp in enumerate(submitted_comps, 1):
+                    st.markdown(f"### {idx}. {comp['competition_name']} ({comp['competition_date']})")
+                    st.write(f"**简介：** {comp['description']}")
+                    
+                    image_urls = json.loads(comp.get('image_urls', '[]'))
+                    if image_urls:
+                        st.write(f"**图片：** {len(image_urls)}张")
+                        cols = st.columns(min(len(image_urls), 3))
+                        for img_idx, img_url in enumerate(image_urls):
+                            with cols[img_idx % 3]:
+                                try:
+                                    st.image(img_url, use_container_width=True)
+                                except:
+                                    st.markdown(f"[🖼️ 查看图片]({img_url})")
+                    
+                    if st.button(f"🗑️ 删除此条记录", key=f"del_submitted_comp_{comp['id']}"):
+                        success, _ = delete_from_supabase("competitions", comp['id'])
+                        if success:
+                            st.success("删除成功！")
+                            st.rerun()
+                        else:
+                            st.error("删除失败，请重试")
+                    st.markdown("---")
+        
         if 'competitions' not in st.session_state:
             st.session_state.competitions = []
         if 'comp_form_key' not in st.session_state:
             st.session_state.comp_form_key = 0
         
-        # 显示已添加的竞赛（带预览）
         if st.session_state.competitions:
-            st.markdown("### 📋 已添加的技能竞赛")
+            st.markdown("### 📝 待提交的技能竞赛")
             for idx, comp in enumerate(st.session_state.competitions):
-                with st.expander(f"✅ {idx+1}. {comp['name']} - {comp['date']}", expanded=False):
+                with st.expander(f"⏳ {idx+1}. {comp['name']} - {comp['date']}", expanded=False):
                     st.write(f"**竞赛日期：** {comp['date']}")
                     st.write(f"**竞赛名称：** {comp['name']}")
                     st.write(f"**竞赛简介：** {comp['description']}")
                     
-                    # 预览图片
                     if comp['images']:
                         st.write(f"**竞赛图片：** {len(comp['images'])}张")
                         cols = st.columns(min(len(comp['images']), 3))
@@ -516,7 +600,6 @@ def main():
                         st.rerun()
             st.markdown("---")
         
-        # 添加新竞赛表单
         with st.form(key=f"comp_form_{st.session_state.comp_form_key}"):
             st.markdown("### ➕ 添加技能竞赛")
             
@@ -596,20 +679,50 @@ def main():
     with tabs[4]:
         st.subheader("获奖情况登记")
         
+        # 加载已提交的数据
+        submitted_awards = load_activities("awards", unit_name)
+        
+        # 显示已提交的获奖
+        if submitted_awards:
+            st.success(f"✅ 您已提交 {len(submitted_awards)} 条获奖记录")
+            with st.expander("📋 查看已提交的获奖情况", expanded=False):
+                for idx, award in enumerate(submitted_awards, 1):
+                    st.markdown(f"### {idx}. {award['award_name']} ({award['award_date']})")
+                    st.write(f"**颁奖单位：** {award.get('award_organization', '未填写')}")
+                    
+                    image_urls = json.loads(award.get('image_urls', '[]'))
+                    if image_urls:
+                        st.write(f"**图片：** {len(image_urls)}张")
+                        cols = st.columns(min(len(image_urls), 3))
+                        for img_idx, img_url in enumerate(image_urls):
+                            with cols[img_idx % 3]:
+                                try:
+                                    st.image(img_url, use_container_width=True)
+                                except:
+                                    st.markdown(f"[🖼️ 查看图片]({img_url})")
+                    
+                    if st.button(f"🗑️ 删除此条记录", key=f"del_submitted_award_{award['id']}"):
+                        success, _ = delete_from_supabase("awards", award['id'])
+                        if success:
+                            st.success("删除成功！")
+                            st.rerun()
+                        else:
+                            st.error("删除失败，请重试")
+                    st.markdown("---")
+        
         if 'awards' not in st.session_state:
             st.session_state.awards = []
         if 'award_form_key' not in st.session_state:
             st.session_state.award_form_key = 0
         
-        # 显示已添加的获奖（带预览）
         if st.session_state.awards:
-            st.markdown("### 📋 已添加的获奖记录")
+            st.markdown("### 📝 待提交的获奖记录")
             for idx, award in enumerate(st.session_state.awards):
-                with st.expander(f"✅ {idx+1}. {award['name']} - {award['date']}", expanded=False):
+                with st.expander(f"⏳ {idx+1}. {award['name']} - {award['date']}", expanded=False):
                     st.write(f"**获奖日期：** {award['date']}")
                     st.write(f"**奖项名称：** {award['name']}")
+                    st.write(f"**颁奖单位：** {award['organization']}")
                     
-                    # 预览图片
                     if award['images']:
                         st.write(f"**获奖图片：** {len(award['images'])}张")
                         cols = st.columns(min(len(award['images']), 3))
@@ -622,15 +735,15 @@ def main():
                         st.rerun()
             st.markdown("---")
         
-        # 添加新获奖表单
         with st.form(key=f"award_form_{st.session_state.award_form_key}"):
             st.markdown("### ➕ 添加获奖记录")
             
             col1, col2 = st.columns(2)
             with col1:
                 award_date = st.date_input("获奖日期*")
-            with col2:
                 award_name = st.text_input("奖项名称*")
+            with col2:
+                award_organization = st.text_input("颁奖单位*", placeholder="例如：揭阳市卫生健康局")
             
             award_images = st.file_uploader(
                 "上传获奖图片",
@@ -645,10 +758,11 @@ def main():
                 submit_final = st.form_submit_button("💾 添加并提交全部", type="primary", use_container_width=True)
             
             if submit_and_continue or submit_final:
-                if award_name:
+                if award_name and award_organization:
                     award_data = {
                         "date": str(award_date),
                         "name": award_name,
+                        "organization": award_organization,
                         "images": award_images if award_images else [],
                         "image_count": len(award_images) if award_images else 0
                     }
@@ -679,6 +793,7 @@ def main():
                                     "unit_name": unit_name,
                                     "award_date": award['date'],
                                     "award_name": award['name'],
+                                    "award_organization": award['organization'],
                                     "image_urls": json.dumps(image_urls),
                                     "created_at": datetime.now().isoformat()
                                 }
@@ -692,49 +807,84 @@ def main():
                                 st.session_state.award_form_key = 0
                                 st.rerun()
                 else:
-                    st.error("❌ 请填写奖项名称")
+                    st.error("❌ 请填写所有必填项（奖项名称和颁奖单位）")
     
     # ========== 科研立项 ==========
     with tabs[5]:
         st.subheader("科研立项登记")
+        
+        # 加载已提交的数据
+        submitted_projects = load_activities("research_projects", unit_name)
+        
+        # 显示已提交的项目
+        if submitted_projects:
+            st.success(f"✅ 您已提交 {len(submitted_projects)} 条科研立项")
+            with st.expander("📋 查看已提交的科研立项", expanded=False):
+                df_data = []
+                for proj in submitted_projects:
+                    df_data.append({
+                        'ID': proj['id'],
+                        '项目负责人': proj['project_leader'],
+                        '项目名称': proj['project_name'],
+                        '立项单位': proj['project_unit'],
+                        '基金名称': proj['fund_name'],
+                        '编号': proj['fund_number'],
+                        '资助金额（万元）': proj['fund_amount'],
+                        '立项时间': proj['project_date']
+                    })
+                df = pd.DataFrame(df_data)
+                st.dataframe(df.drop('ID', axis=1), use_container_width=True, hide_index=True)
+                
+                # 删除按钮
+                for proj in submitted_projects:
+                    col1, col2 = st.columns([8, 2])
+                    with col1:
+                        st.write(f"**{proj['project_name']}** - {proj['project_leader']}")
+                    with col2:
+                        if st.button(f"🗑️ 删除", key=f"del_submitted_proj_{proj['id']}"):
+                            success, _ = delete_from_supabase("research_projects", proj['id'])
+                            if success:
+                                st.success("删除成功！")
+                                st.rerun()
+                            else:
+                                st.error("删除失败，请重试")
         
         if 'research_projects' not in st.session_state:
             st.session_state.research_projects = []
         if 'project_form_key' not in st.session_state:
             st.session_state.project_form_key = 0
         
-        # 显示已添加的项目
         if st.session_state.research_projects:
-            st.markdown("### 📋 已添加的科研立项")
+            st.markdown("### 📝 待提交的科研立项")
             df = pd.DataFrame(st.session_state.research_projects)
             st.dataframe(df, use_container_width=True, hide_index=True)
             
             for idx in range(len(st.session_state.research_projects)):
-                col1, col2, col3 = st.columns([6, 1, 1])
+                col1, col2 = st.columns([8, 2])
                 with col1:
                     st.write(f"{idx+1}. {st.session_state.research_projects[idx]['name']}")
-                with col3:
+                with col2:
                     if st.button(f"🗑️ 删除", key=f"del_proj_{idx}"):
                         st.session_state.research_projects.pop(idx)
                         st.rerun()
             st.markdown("---")
         
-        # 添加新项目表单
         with st.form(key=f"project_form_{st.session_state.project_form_key}"):
             st.markdown("### ➕ 添加科研立项")
+            st.info("⚠️ 所有字段均为必填项")
             
             col1, col2 = st.columns(2)
             with col1:
                 project_leader = st.text_input("项目负责人*")
                 project_name = st.text_input("项目名称*")
-                project_unit = st.text_input("立项单位", value=unit_name)
+                project_unit = st.text_input("立项单位*", value=unit_name)
             
             with col2:
-                fund_name = st.text_input("基金名称")
-                fund_number = st.text_input("编号")
-                fund_amount = st.number_input("资助金额（万元）", min_value=0.0, step=0.1)
+                fund_name = st.text_input("基金名称*")
+                fund_number = st.text_input("编号*")
+                fund_amount = st.number_input("资助金额（万元）*", min_value=0.0, step=0.1)
             
-            project_date = st.date_input("立项时间")
+            project_date = st.date_input("立项时间*")
             
             col1, col2 = st.columns(2)
             with col1:
@@ -743,7 +893,9 @@ def main():
                 submit_final = st.form_submit_button("💾 添加并提交全部", type="primary", use_container_width=True)
             
             if submit_and_continue or submit_final:
-                if project_leader and project_name:
+                # 验证所有必填字段
+                if (project_leader and project_name and project_unit and 
+                    fund_name and fund_number and fund_amount > 0):
                     project_data = {
                         "leader": project_leader,
                         "name": project_name,
@@ -784,34 +936,67 @@ def main():
                                 st.session_state.project_form_key = 0
                                 st.rerun()
                 else:
-                    st.error("❌ 请至少填写项目负责人和项目名称")
+                    st.error("❌ 请填写所有必填项（所有字段都是必填的）")
     
     # ========== 论文发表 ==========
     with tabs[6]:
         st.subheader("论文发表登记")
+        
+        # 加载已提交的数据
+        submitted_pubs = load_activities("publications", unit_name)
+        
+        # 显示已提交的论文
+        if submitted_pubs:
+            st.success(f"✅ 您已提交 {len(submitted_pubs)} 条论文发表")
+            with st.expander("📋 查看已提交的论文发表", expanded=False):
+                df_data = []
+                for pub in submitted_pubs:
+                    df_data.append({
+                        'ID': pub['id'],
+                        '类型': pub['publication_type'],
+                        '题目': pub['title'],
+                        '刊物名称': pub['journal'],
+                        '作者': pub['author'],
+                        '刊物等级': pub['level'],
+                        '发表时间': pub['publication_date']
+                    })
+                df = pd.DataFrame(df_data)
+                st.dataframe(df.drop('ID', axis=1), use_container_width=True, hide_index=True)
+                
+                # 删除按钮
+                for pub in submitted_pubs:
+                    col1, col2 = st.columns([8, 2])
+                    with col1:
+                        st.write(f"**{pub['title']}** - {pub['author']}")
+                    with col2:
+                        if st.button(f"🗑️ 删除", key=f"del_submitted_pub_{pub['id']}"):
+                            success, _ = delete_from_supabase("publications", pub['id'])
+                            if success:
+                                st.success("删除成功！")
+                                st.rerun()
+                            else:
+                                st.error("删除失败，请重试")
         
         if 'publications' not in st.session_state:
             st.session_state.publications = []
         if 'pub_form_key' not in st.session_state:
             st.session_state.pub_form_key = 0
         
-        # 显示已添加的论文
         if st.session_state.publications:
-            st.markdown("### 📋 已添加的论文发表")
+            st.markdown("### 📝 待提交的论文发表")
             df = pd.DataFrame(st.session_state.publications)
             st.dataframe(df, use_container_width=True, hide_index=True)
             
             for idx in range(len(st.session_state.publications)):
-                col1, col2, col3 = st.columns([6, 1, 1])
+                col1, col2 = st.columns([8, 2])
                 with col1:
                     st.write(f"{idx+1}. {st.session_state.publications[idx]['title']}")
-                with col3:
+                with col2:
                     if st.button(f"🗑️ 删除", key=f"del_pub_{idx}"):
                         st.session_state.publications.pop(idx)
                         st.rerun()
             st.markdown("---")
         
-        # 添加新论文表单
         with st.form(key=f"pub_form_{st.session_state.pub_form_key}"):
             st.markdown("### ➕ 添加论文发表")
             
@@ -823,7 +1008,7 @@ def main():
             col1, col2 = st.columns(2)
             with col1:
                 pub_title = st.text_input("论文/专著/专利题目*")
-                pub_journal = st.text_input("刊物/专著名称")
+                pub_journal = st.text_input("刊物/专著名称*")
                 pub_cn = st.text_input("刊物CN号/出版社名称")
                 pub_department = st.text_input("刊物主管部门")
             
@@ -832,11 +1017,11 @@ def main():
                 pub_pages = st.text_input("页码")
                 pub_author = st.text_input("第一作者/通讯作者*")
                 pub_level = st.selectbox(
-                    "刊物等级",
-                    ["SCI", "中文核心期刊", "科技核心", "省级期刊", "其他"]
+                    "刊物等级*",
+                    ["", "SCI", "中文核心期刊", "科技核心", "省级期刊", "其他"]
                 )
             
-            pub_date = st.date_input("发表时间")
+            pub_date = st.date_input("发表时间*")
             
             col1, col2 = st.columns(2)
             with col1:
@@ -845,7 +1030,8 @@ def main():
                 submit_final = st.form_submit_button("💾 添加并提交全部", type="primary", use_container_width=True)
             
             if submit_and_continue or submit_final:
-                if pub_title and pub_author:
+                # 验证必填字段
+                if pub_title and pub_author and pub_journal and pub_level:
                     pub_data = {
                         "type": pub_type,
                         "title": pub_title,
@@ -892,7 +1078,7 @@ def main():
                                 st.session_state.pub_form_key = 0
                                 st.rerun()
                 else:
-                    st.error("❌ 请至少填写题目和作者")
+                    st.error("❌ 请填写所有必填项（题目、作者、刊物名称、刊物等级）")
     
     # ========== 提交概览 ==========
     with tabs[7]:
@@ -916,18 +1102,22 @@ def main():
         with col4:
             st.metric("获奖情况", award_count)
         
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         
         project_count = len(get_from_supabase("research_projects", unit_name))
         pub_count = len(get_from_supabase("publications", unit_name))
+        summary_count = 1 if load_unit_summary(unit_name) else 0
         
         with col1:
             st.metric("科研立项", project_count)
         with col2:
             st.metric("论文发表", pub_count)
+        with col3:
+            st.metric("年度总结", "已提交" if summary_count else "未提交")
         
         st.markdown("---")
         st.success("✅ 所有数据已保存到云端数据库，管理员可实时查看")
+        st.info("💡 您可以随时重新打开此页面查看和管理已提交的数据")
 
 if __name__ == "__main__":
     main()
