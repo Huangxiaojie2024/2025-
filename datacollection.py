@@ -77,16 +77,19 @@ def validate_phone(phone):
 
 def file_to_base64(file):
     """将文件转换为base64字符串"""
-    return base64.b64encode(file.getvalue()).decode()
+    try:
+        return base64.b64encode(file.getvalue()).decode('utf-8')
+    except Exception as e:
+        st.error(f"文件编码失败: {str(e)}")
+        return None
 
-def base64_to_file(b64_string, filename, file_type):
-    """将base64字符串转换回文件对象"""
-    file_bytes = base64.b64decode(b64_string)
-    return type('UploadedFile', (), {
-        'name': filename,
-        'type': file_type,
-        'getvalue': lambda: file_bytes
-    })()
+def base64_to_bytes(b64_string):
+    """将base64字符串转换为字节"""
+    try:
+        return base64.b64decode(b64_string)
+    except Exception as e:
+        st.error(f"文件解码失败: {str(e)}")
+        return None
 
 # ==================== 数据库操作函数 ====================
 
@@ -132,16 +135,15 @@ def delete_from_supabase(table_name, record_id):
     except Exception as e:
         return False, str(e)
 
-def upload_file_to_storage(file, bucket_name, file_path):
-    """上传文件到Supabase Storage（不覆盖，使用版本号）"""
+def upload_file_to_storage(file_bytes, file_type, bucket_name, file_path):
+    """上传文件到Supabase Storage（使用字节数据）"""
     try:
-        file_bytes = file.getvalue()
         file_path = file_path.encode('ascii', 'ignore').decode('ascii')
         
         result = supabase.storage.from_(bucket_name).upload(
             file_path, 
             file_bytes,
-            {"content-type": file.type, "upsert": "false"}
+            {"content-type": file_type, "upsert": "false"}
         )
         
         public_url = supabase.storage.from_(bucket_name).get_public_url(file_path)
@@ -188,14 +190,6 @@ def delete_pending_item(table_name, item_id):
     except Exception as e:
         return False, str(e)
 
-def clear_pending_data(table_name, unit_name):
-    """清空单位的所有待提交数据"""
-    try:
-        result = supabase.table(table_name).delete().eq("unit_name", unit_name).execute()
-        return True, result
-    except Exception as e:
-        return False, str(e)
-
 # ==================== 数据加载函数 ====================
 
 def load_unit_summary(unit_name):
@@ -215,6 +209,96 @@ def load_summary_documents(unit_name):
 def load_activities(table_name, unit_name):
     """加载活动数据"""
     return get_from_supabase(table_name, unit_name)
+
+# ==================== 提交处理函数 ====================
+
+def submit_pending_activities(pending_data, unit_name, activity_type, target_table, pending_table):
+    """
+    统一的待提交活动提交处理函数
+    activity_type: 'academic', 'popular', 'competition', 'award'
+    """
+    success_count = 0
+    failed_items = []
+    safe_unit_folder = get_unit_safe_name(unit_name)
+    
+    for activity in pending_data:
+        try:
+            image_urls = []
+            
+            # 处理图片
+            if activity.get('image_data'):
+                try:
+                    image_info = json.loads(activity['image_data'])
+                    for img_idx, img_data in enumerate(image_info):
+                        # 从base64还原字节数据
+                        img_bytes = base64_to_bytes(img_data['data'])
+                        if img_bytes:
+                            safe_filename = generate_safe_filename(img_data['name'], prefix=f"{activity_type}_{img_idx}")
+                            
+                            # 根据活动类型选择名称字段
+                            if activity_type == 'award':
+                                activity_name = activity['award_name']
+                            elif activity_type == 'competition':
+                                activity_name = activity['competition_name']
+                            else:
+                                activity_name = activity['activity_name']
+                            
+                            safe_activity_name = sanitize_path(activity_name[:30])
+                            file_path = f"{safe_unit_folder}/{activity_type}/{safe_activity_name}/{safe_filename}"
+                            
+                            success, result = upload_file_to_storage(
+                                img_bytes, 
+                                img_data['type'], 
+                                "images", 
+                                file_path
+                            )
+                            if success:
+                                image_urls.append(result)
+                except Exception as e:
+                    st.warning(f"处理图片时出错: {str(e)}")
+            
+            # 构建数据字典
+            if activity_type == 'award':
+                data = {
+                    "unit_name": unit_name,
+                    "award_date": activity['award_date'],
+                    "award_name": activity['award_name'],
+                    "award_organization": activity['award_organization'],
+                    "image_urls": json.dumps(image_urls),
+                    "created_at": datetime.now().isoformat()
+                }
+            elif activity_type == 'competition':
+                data = {
+                    "unit_name": unit_name,
+                    "competition_date": activity['competition_date'],
+                    "competition_name": activity['competition_name'],
+                    "description": activity['description'],
+                    "image_urls": json.dumps(image_urls),
+                    "created_at": datetime.now().isoformat()
+                }
+            else:  # academic or popular
+                data = {
+                    "unit_name": unit_name,
+                    "activity_date": activity['activity_date'],
+                    "activity_name": activity['activity_name'],
+                    "description": activity['description'],
+                    "image_urls": json.dumps(image_urls),
+                    "created_at": datetime.now().isoformat()
+                }
+            
+            # 保存到正式表
+            success, result = save_to_supabase(target_table, data)
+            if success:
+                success_count += 1
+                # 从临时表删除
+                delete_pending_item(pending_table, activity['id'])
+            else:
+                failed_items.append(activity)
+        except Exception as e:
+            failed_items.append(activity)
+            st.error(f"处理记录时出错: {str(e)}")
+    
+    return success_count, failed_items
 
 # ==================== 主程序 ====================
 
@@ -341,7 +425,12 @@ def main():
                         
                         st.info(f"📁 上传路径: {file_path}")
                         
-                        success, result = upload_file_to_storage(summary_plan_file, "documents", file_path)
+                        success, result = upload_file_to_storage(
+                            summary_plan_file.getvalue(),
+                            summary_plan_file.type,
+                            "documents",
+                            file_path
+                        )
                         
                         if success:
                             document_url = result
@@ -385,10 +474,8 @@ def main():
     with tabs[1]:
         st.subheader("学术活动登记")
         
-        # 加载已提交的数据
         submitted_academic = load_activities("academic_activities", unit_name)
         
-        # 显示已提交的活动
         if submitted_academic:
             st.success(f"✅ 您已提交 {len(submitted_academic)} 条学术活动")
             with st.expander("📋 查看已提交的学术活动", expanded=False):
@@ -416,13 +503,11 @@ def main():
                             st.error("删除失败，请重试")
                     st.markdown("---")
         
-        # 从临时表加载待提交列表
         pending_academic = load_pending_data("pending_academic_activities", unit_name)
         
-        # 显示待提交的活动
         if pending_academic:
             st.markdown("### 📝 待提交的学术活动")
-            st.warning(f"⏳ 您有 {len(pending_academic)} 条待提交的学术活动，请点击下方按钮提交")
+            st.warning(f"⏳ 您有 {len(pending_academic)} 条待提交的学术活动")
             
             for idx, activity in enumerate(pending_academic):
                 with st.expander(f"⏳ {idx+1}. {activity['activity_name']} - {activity['activity_date']}", expanded=False):
@@ -430,7 +515,6 @@ def main():
                     st.write(f"**活动名称：** {activity['activity_name']}")
                     st.write(f"**活动简介：** {activity['description']}")
                     
-                    # 显示图片（从base64还原）
                     if activity.get('image_data'):
                         try:
                             image_info = json.loads(activity['image_data'])
@@ -440,8 +524,9 @@ def main():
                                 for img_idx, img_data in enumerate(image_info):
                                     with cols[img_idx % 3]:
                                         try:
-                                            img_bytes = base64.b64decode(img_data['data'])
-                                            st.image(img_bytes, caption=f"图片 {img_idx+1}", use_container_width=True)
+                                            img_bytes = base64_to_bytes(img_data['data'])
+                                            if img_bytes:
+                                                st.image(img_bytes, caption=f"图片 {img_idx+1}", use_container_width=True)
                                         except:
                                             pass
                         except:
@@ -453,63 +538,28 @@ def main():
                             st.success("删除成功！")
                             st.rerun()
             
-            # 添加提交全部按钮
             col1, col2 = st.columns([3, 1])
             with col2:
                 if st.button("💾 提交全部待提交内容", key="submit_all_pending_academic", type="primary", use_container_width=True):
                     with st.spinner("正在提交数据..."):
-                        success_count = 0
-                        safe_unit_folder = get_unit_safe_name(unit_name)
-                        
-                        for activity in pending_academic:
-                            image_urls = []
-                            
-                            # 处理图片
-                            if activity.get('image_data'):
-                                try:
-                                    image_info = json.loads(activity['image_data'])
-                                    for img_idx, img_data in enumerate(image_info):
-                                        # 从base64还原文件
-                                        img_file = base64_to_file(
-                                            img_data['data'], 
-                                            img_data['name'], 
-                                            img_data['type']
-                                        )
-                                        
-                                        safe_filename = generate_safe_filename(img_file.name, prefix=f"academic_{img_idx}")
-                                        safe_activity_name = sanitize_path(activity['activity_name'][:30])
-                                        file_path = f"{safe_unit_folder}/academic/{safe_activity_name}/{safe_filename}"
-                                        
-                                        success, result = upload_file_to_storage(img_file, "images", file_path)
-                                        if success:
-                                            image_urls.append(result)
-                                except Exception as e:
-                                    st.warning(f"图片上传失败: {str(e)}")
-                            
-                            # 保存到正式表
-                            data = {
-                                "unit_name": unit_name,
-                                "activity_date": activity['activity_date'],
-                                "activity_name": activity['activity_name'],
-                                "description": activity['description'],
-                                "image_urls": json.dumps(image_urls),
-                                "created_at": datetime.now().isoformat()
-                            }
-                            success, result = save_to_supabase("academic_activities", data)
-                            if success:
-                                success_count += 1
-                                # 从临时表删除
-                                delete_pending_item("pending_academic_activities", activity['id'])
+                        success_count, failed_items = submit_pending_activities(
+                            pending_academic, 
+                            unit_name, 
+                            'academic',
+                            'academic_activities',
+                            'pending_academic_activities'
+                        )
                         
                         if success_count == len(pending_academic):
                             st.success(f"✅ 成功提交{success_count}条学术活动记录！")
                             st.rerun()
+                        elif success_count > 0:
+                            st.warning(f"⚠️ 成功提交{success_count}条，失败{len(failed_items)}条")
                         else:
-                            st.warning(f"⚠️ 成功提交{success_count}条，共{len(pending_academic)}条")
+                            st.error(f"❌ 提交失败，请检查数据或联系管理员")
             
             st.markdown("---")
         
-        # 添加新活动表单
         with st.form(key="academic_form_new"):
             st.markdown("### ➕ 添加学术活动")
             
@@ -539,18 +589,18 @@ def main():
                     if activity_images and len(activity_images) > 3:
                         st.error("❌ 最多只能上传3张图片")
                     else:
-                        # 将图片转换为base64存储
                         image_data_list = []
                         if activity_images:
                             for img in activity_images:
-                                image_data_list.append({
-                                    'name': img.name,
-                                    'type': img.type,
-                                    'data': file_to_base64(img)
-                                })
+                                b64_data = file_to_base64(img)
+                                if b64_data:
+                                    image_data_list.append({
+                                        'name': img.name,
+                                        'type': img.type,
+                                        'data': b64_data
+                                    })
                         
                         if submit_and_continue:
-                            # 保存到临时表
                             pending_data = {
                                 "unit_name": unit_name,
                                 "activity_date": str(activity_date),
@@ -564,10 +614,9 @@ def main():
                                 st.info("💡 请点击上方【提交全部待提交内容】按钮完成提交，或继续添加更多活动")
                                 st.rerun()
                             else:
-                                st.error("❌ 保存失败，请重试")
+                                st.error(f"❌ 保存失败: {result}")
                         
                         elif submit_final:
-                            # 直接提交
                             with st.spinner("正在上传数据..."):
                                 image_urls = []
                                 safe_unit_folder = get_unit_safe_name(unit_name)
@@ -578,7 +627,12 @@ def main():
                                         safe_activity_name = sanitize_path(activity_name[:30])
                                         file_path = f"{safe_unit_folder}/academic/{safe_activity_name}/{safe_filename}"
                                         
-                                        success, result = upload_file_to_storage(img, "images", file_path)
+                                        success, result = upload_file_to_storage(
+                                            img.getvalue(),
+                                            img.type,
+                                            "images",
+                                            file_path
+                                        )
                                         if success:
                                             image_urls.append(result)
                                 
@@ -595,7 +649,7 @@ def main():
                                     st.success(f"✅ 成功提交1条学术活动记录！")
                                     st.rerun()
                                 else:
-                                    st.error("❌ 提交失败")
+                                    st.error(f"❌ 提交失败: {result}")
                 else:
                     st.error("❌ 请填写所有必填项（标有*）")
     
@@ -653,8 +707,9 @@ def main():
                                 for img_idx, img_data in enumerate(image_info):
                                     with cols[img_idx % 3]:
                                         try:
-                                            img_bytes = base64.b64decode(img_data['data'])
-                                            st.image(img_bytes, caption=f"图片 {img_idx+1}", use_container_width=True)
+                                            img_bytes = base64_to_bytes(img_data['data'])
+                                            if img_bytes:
+                                                st.image(img_bytes, caption=f"图片 {img_idx+1}", use_container_width=True)
                                         except:
                                             pass
                         except:
@@ -670,45 +725,21 @@ def main():
             with col2:
                 if st.button("💾 提交全部待提交内容", key="submit_all_pending_popular", type="primary", use_container_width=True):
                     with st.spinner("正在提交数据..."):
-                        success_count = 0
-                        safe_unit_folder = get_unit_safe_name(unit_name)
-                        
-                        for activity in pending_popular:
-                            image_urls = []
-                            
-                            if activity.get('image_data'):
-                                try:
-                                    image_info = json.loads(activity['image_data'])
-                                    for img_idx, img_data in enumerate(image_info):
-                                        img_file = base64_to_file(img_data['data'], img_data['name'], img_data['type'])
-                                        safe_filename = generate_safe_filename(img_file.name, prefix=f"popular_{img_idx}")
-                                        safe_activity_name = sanitize_path(activity['activity_name'][:30])
-                                        file_path = f"{safe_unit_folder}/popular/{safe_activity_name}/{safe_filename}"
-                                        
-                                        success, result = upload_file_to_storage(img_file, "images", file_path)
-                                        if success:
-                                            image_urls.append(result)
-                                except:
-                                    pass
-                            
-                            data = {
-                                "unit_name": unit_name,
-                                "activity_date": activity['activity_date'],
-                                "activity_name": activity['activity_name'],
-                                "description": activity['description'],
-                                "image_urls": json.dumps(image_urls),
-                                "created_at": datetime.now().isoformat()
-                            }
-                            success, result = save_to_supabase("popular_activities", data)
-                            if success:
-                                success_count += 1
-                                delete_pending_item("pending_popular_activities", activity['id'])
+                        success_count, failed_items = submit_pending_activities(
+                            pending_popular,
+                            unit_name,
+                            'popular',
+                            'popular_activities',
+                            'pending_popular_activities'
+                        )
                         
                         if success_count == len(pending_popular):
                             st.success(f"✅ 成功提交{success_count}条科普活动记录！")
                             st.rerun()
+                        elif success_count > 0:
+                            st.warning(f"⚠️ 成功提交{success_count}条，失败{len(failed_items)}条")
                         else:
-                            st.warning(f"⚠️ 成功提交{success_count}条")
+                            st.error(f"❌ 提交失败，请检查数据或联系管理员")
             
             st.markdown("---")
         
@@ -744,11 +775,13 @@ def main():
                         image_data_list = []
                         if pop_images:
                             for img in pop_images:
-                                image_data_list.append({
-                                    'name': img.name,
-                                    'type': img.type,
-                                    'data': file_to_base64(img)
-                                })
+                                b64_data = file_to_base64(img)
+                                if b64_data:
+                                    image_data_list.append({
+                                        'name': img.name,
+                                        'type': img.type,
+                                        'data': b64_data
+                                    })
                         
                         if submit_and_continue:
                             pending_data = {
@@ -764,7 +797,7 @@ def main():
                                 st.info("💡 请点击上方【提交全部待提交内容】按钮完成提交")
                                 st.rerun()
                             else:
-                                st.error("❌ 保存失败")
+                                st.error(f"❌ 保存失败: {result}")
                         
                         elif submit_final:
                             with st.spinner("正在上传数据..."):
@@ -777,7 +810,12 @@ def main():
                                         safe_activity_name = sanitize_path(pop_name[:30])
                                         file_path = f"{safe_unit_folder}/popular/{safe_activity_name}/{safe_filename}"
                                         
-                                        success, result = upload_file_to_storage(img, "images", file_path)
+                                        success, result = upload_file_to_storage(
+                                            img.getvalue(),
+                                            img.type,
+                                            "images",
+                                            file_path
+                                        )
                                         if success:
                                             image_urls.append(result)
                                 
@@ -793,6 +831,8 @@ def main():
                                 if success:
                                     st.success(f"✅ 成功提交1条科普活动记录！")
                                     st.rerun()
+                                else:
+                                    st.error(f"❌ 提交失败: {result}")
                 else:
                     st.error("❌ 请填写所有必填项（标有*）")
     
@@ -850,8 +890,9 @@ def main():
                                 for img_idx, img_data in enumerate(image_info):
                                     with cols[img_idx % 3]:
                                         try:
-                                            img_bytes = base64.b64decode(img_data['data'])
-                                            st.image(img_bytes, caption=f"图片 {img_idx+1}", use_container_width=True)
+                                            img_bytes = base64_to_bytes(img_data['data'])
+                                            if img_bytes:
+                                                st.image(img_bytes, caption=f"图片 {img_idx+1}", use_container_width=True)
                                         except:
                                             pass
                         except:
@@ -867,45 +908,21 @@ def main():
             with col2:
                 if st.button("💾 提交全部待提交内容", key="submit_all_pending_comps", type="primary", use_container_width=True):
                     with st.spinner("正在提交数据..."):
-                        success_count = 0
-                        safe_unit_folder = get_unit_safe_name(unit_name)
-                        
-                        for comp in pending_comps:
-                            image_urls = []
-                            
-                            if comp.get('image_data'):
-                                try:
-                                    image_info = json.loads(comp['image_data'])
-                                    for img_idx, img_data in enumerate(image_info):
-                                        img_file = base64_to_file(img_data['data'], img_data['name'], img_data['type'])
-                                        safe_filename = generate_safe_filename(img_file.name, prefix=f"comp_{img_idx}")
-                                        safe_comp_name = sanitize_path(comp['competition_name'][:30])
-                                        file_path = f"{safe_unit_folder}/competition/{safe_comp_name}/{safe_filename}"
-                                        
-                                        success, result = upload_file_to_storage(img_file, "images", file_path)
-                                        if success:
-                                            image_urls.append(result)
-                                except:
-                                    pass
-                            
-                            data = {
-                                "unit_name": unit_name,
-                                "competition_date": comp['competition_date'],
-                                "competition_name": comp['competition_name'],
-                                "description": comp['description'],
-                                "image_urls": json.dumps(image_urls),
-                                "created_at": datetime.now().isoformat()
-                            }
-                            success, result = save_to_supabase("competitions", data)
-                            if success:
-                                success_count += 1
-                                delete_pending_item("pending_competitions", comp['id'])
+                        success_count, failed_items = submit_pending_activities(
+                            pending_comps,
+                            unit_name,
+                            'competition',
+                            'competitions',
+                            'pending_competitions'
+                        )
                         
                         if success_count == len(pending_comps):
                             st.success(f"✅ 成功提交{success_count}条技能竞赛记录！")
                             st.rerun()
+                        elif success_count > 0:
+                            st.warning(f"⚠️ 成功提交{success_count}条，失败{len(failed_items)}条")
                         else:
-                            st.warning(f"⚠️ 成功提交{success_count}条")
+                            st.error(f"❌ 提交失败，请检查数据或联系管理员")
             
             st.markdown("---")
         
@@ -938,11 +955,13 @@ def main():
                     image_data_list = []
                     if comp_images:
                         for img in comp_images:
-                            image_data_list.append({
-                                'name': img.name,
-                                'type': img.type,
-                                'data': file_to_base64(img)
-                            })
+                            b64_data = file_to_base64(img)
+                            if b64_data:
+                                image_data_list.append({
+                                    'name': img.name,
+                                    'type': img.type,
+                                    'data': b64_data
+                                })
                     
                     if submit_and_continue:
                         pending_data = {
@@ -958,7 +977,7 @@ def main():
                             st.info("💡 请点击上方【提交全部待提交内容】按钮完成提交")
                             st.rerun()
                         else:
-                            st.error("❌ 保存失败")
+                            st.error(f"❌ 保存失败: {result}")
                     
                     elif submit_final:
                         with st.spinner("正在上传数据..."):
@@ -971,7 +990,12 @@ def main():
                                     safe_comp_name = sanitize_path(comp_name[:30])
                                     file_path = f"{safe_unit_folder}/competition/{safe_comp_name}/{safe_filename}"
                                     
-                                    success, result = upload_file_to_storage(img, "images", file_path)
+                                    success, result = upload_file_to_storage(
+                                        img.getvalue(),
+                                        img.type,
+                                        "images",
+                                        file_path
+                                    )
                                     if success:
                                         image_urls.append(result)
                             
@@ -987,6 +1011,8 @@ def main():
                             if success:
                                 st.success(f"✅ 成功提交1条技能竞赛记录！")
                                 st.rerun()
+                            else:
+                                st.error(f"❌ 提交失败: {result}")
                 else:
                     st.error("❌ 请填写所有必填项（标有*）")
     
@@ -1044,8 +1070,9 @@ def main():
                                 for img_idx, img_data in enumerate(image_info):
                                     with cols[img_idx % 3]:
                                         try:
-                                            img_bytes = base64.b64decode(img_data['data'])
-                                            st.image(img_bytes, caption=f"图片 {img_idx+1}", use_container_width=True)
+                                            img_bytes = base64_to_bytes(img_data['data'])
+                                            if img_bytes:
+                                                st.image(img_bytes, caption=f"图片 {img_idx+1}", use_container_width=True)
                                         except:
                                             pass
                         except:
@@ -1061,45 +1088,21 @@ def main():
             with col2:
                 if st.button("💾 提交全部待提交内容", key="submit_all_pending_awards", type="primary", use_container_width=True):
                     with st.spinner("正在提交数据..."):
-                        success_count = 0
-                        safe_unit_folder = get_unit_safe_name(unit_name)
-                        
-                        for award in pending_awards:
-                            image_urls = []
-                            
-                            if award.get('image_data'):
-                                try:
-                                    image_info = json.loads(award['image_data'])
-                                    for img_idx, img_data in enumerate(image_info):
-                                        img_file = base64_to_file(img_data['data'], img_data['name'], img_data['type'])
-                                        safe_filename = generate_safe_filename(img_file.name, prefix=f"award_{img_idx}")
-                                        safe_award_name = sanitize_path(award['award_name'][:30])
-                                        file_path = f"{safe_unit_folder}/award/{safe_award_name}/{safe_filename}"
-                                        
-                                        success, result = upload_file_to_storage(img_file, "images", file_path)
-                                        if success:
-                                            image_urls.append(result)
-                                except:
-                                    pass
-                            
-                            data = {
-                                "unit_name": unit_name,
-                                "award_date": award['award_date'],
-                                "award_name": award['award_name'],
-                                "award_organization": award['award_organization'],
-                                "image_urls": json.dumps(image_urls),
-                                "created_at": datetime.now().isoformat()
-                            }
-                            success, result = save_to_supabase("awards", data)
-                            if success:
-                                success_count += 1
-                                delete_pending_item("pending_awards", award['id'])
+                        success_count, failed_items = submit_pending_activities(
+                            pending_awards,
+                            unit_name,
+                            'award',
+                            'awards',
+                            'pending_awards'
+                        )
                         
                         if success_count == len(pending_awards):
                             st.success(f"✅ 成功提交{success_count}条获奖记录！")
                             st.rerun()
+                        elif success_count > 0:
+                            st.warning(f"⚠️ 成功提交{success_count}条，失败{len(failed_items)}条")
                         else:
-                            st.warning(f"⚠️ 成功提交{success_count}条")
+                            st.error(f"❌ 提交失败，请检查数据或联系管理员")
             
             st.markdown("---")
         
@@ -1131,11 +1134,13 @@ def main():
                     image_data_list = []
                     if award_images:
                         for img in award_images:
-                            image_data_list.append({
-                                'name': img.name,
-                                'type': img.type,
-                                'data': file_to_base64(img)
-                            })
+                            b64_data = file_to_base64(img)
+                            if b64_data:
+                                image_data_list.append({
+                                    'name': img.name,
+                                    'type': img.type,
+                                    'data': b64_data
+                                })
                     
                     if submit_and_continue:
                         pending_data = {
@@ -1151,7 +1156,7 @@ def main():
                             st.info("💡 请点击上方【提交全部待提交内容】按钮完成提交")
                             st.rerun()
                         else:
-                            st.error("❌ 保存失败")
+                            st.error(f"❌ 保存失败: {result}")
                     
                     elif submit_final:
                         with st.spinner("正在上传数据..."):
@@ -1164,7 +1169,12 @@ def main():
                                     safe_award_name = sanitize_path(award_name[:30])
                                     file_path = f"{safe_unit_folder}/award/{safe_award_name}/{safe_filename}"
                                     
-                                    success, result = upload_file_to_storage(img, "images", file_path)
+                                    success, result = upload_file_to_storage(
+                                        img.getvalue(),
+                                        img.type,
+                                        "images",
+                                        file_path
+                                    )
                                     if success:
                                         image_urls.append(result)
                             
@@ -1180,6 +1190,8 @@ def main():
                             if success:
                                 st.success(f"✅ 成功提交1条获奖记录！")
                                 st.rerun()
+                            else:
+                                st.error(f"❌ 提交失败: {result}")
                 else:
                     st.error("❌ 请填写所有必填项（奖项名称和颁奖单位）")
     
@@ -1324,7 +1336,7 @@ def main():
                             st.info("💡 请点击上方【提交全部待提交内容】按钮完成提交")
                             st.rerun()
                         else:
-                            st.error("❌ 保存失败")
+                            st.error(f"❌ 保存失败: {result}")
                     
                     elif submit_final:
                         with st.spinner("正在保存数据..."):
@@ -1343,6 +1355,8 @@ def main():
                             if success:
                                 st.success(f"✅ 成功提交1条科研立项记录！")
                                 st.rerun()
+                            else:
+                                st.error(f"❌ 提交失败: {result}")
                 else:
                     st.error("❌ 请填写所有必填项（除资助金额外）")
     
@@ -1500,7 +1514,7 @@ def main():
                             st.info("💡 请点击上方【提交全部待提交内容】按钮完成提交")
                             st.rerun()
                         else:
-                            st.error("❌ 保存失败")
+                            st.error(f"❌ 保存失败: {result}")
                     
                     elif submit_final:
                         with st.spinner("正在保存数据..."):
@@ -1522,6 +1536,8 @@ def main():
                             if success:
                                 st.success(f"✅ 成功提交1条论文发表记录！")
                                 st.rerun()
+                            else:
+                                st.error(f"❌ 提交失败: {result}")
                 else:
                     st.error("❌ 请填写所有必填项（题目、作者、刊物名称、刊物等级）")
     
