@@ -964,7 +964,7 @@ def main():
         
         with st.form(key=f"project_form_{st.session_state.project_form_key}"):
             st.markdown("### ➕ 添加科研立项")
-            st.info("⚠️ 所有字段均为必填项")
+            st.info("⚠️ 除资助金额外，其他字段均为必填项")
             
             col1, col2 = st.columns(2)
             with col1:
@@ -975,7 +975,7 @@ def main():
             with col2:
                 fund_name = st.text_input("基金名称*")
                 fund_number = st.text_input("编号*")
-                fund_amount = st.number_input("资助金额（万元）*", min_value=0.0, step=0.1)
+                fund_amount = st.number_input("资助金额（万元）", min_value=0.0, step=0.1, value=0.0)
             
             project_date = st.date_input("立项时间*")
             
@@ -988,7 +988,7 @@ def main():
             if submit_and_continue or submit_final:
                 # 验证所有必填字段
                 if (project_leader and project_name and project_unit and 
-                    fund_name and fund_number and fund_amount > 0):
+                    fund_name and fund_number):
                     project_data = {
                         "leader": project_leader,
                         "name": project_name,
